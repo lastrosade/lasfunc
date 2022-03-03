@@ -28,7 +28,8 @@ def round_to_closest(n:Union[int,float]) -> int:
     return math.ceil(n)
 
 def boundary_pad(clip:vs.VideoNode, boundary_width:int, boundary_height:int) -> vs.VideoNode:
-    clip = vs.core.std.AddBorders(clip, left=(boundary_width-clip.width)/2, right=(boundary_width-clip.width)/2, top=(boundary_height-clip.height)/2, bottom=(boundary_height-clip.height)/2)
+    if (boundary_width > clip.width) or (boundary_height > clip.height):
+        clip = vs.core.std.AddBorders(clip, left=(boundary_width-clip.width)/2, right=(boundary_width-clip.width)/2, top=(boundary_height-clip.height)/2, bottom=(boundary_height-clip.height)/2)
     return clip
 
 def boundary_resize(clip:vs.VideoNode, boundary_width:int, boundary_height:int, 
