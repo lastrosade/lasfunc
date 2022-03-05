@@ -3,8 +3,13 @@ A set of functions for vapoursynth.
 
 ## Usage
 
-### Write a clip to a y4m file.
-    write_to_file(clip:vs.VideoNode, filestr:str) -> None
+### Encode a clip to ffv1.
+    ffmpeg.ffv1(clip:vs.VideoNode, filestr:str) -> None
+
+### Encode a clip to av1.
+    ffmpeg.aom(clip:vs.VideoNode, filestr:str, speed:int=3, quantizer:int=32, gop:int=None, lif:int=None, tiles_row:int=None, tiles_col:int=None, enable_cdef:bool=True, enable_restoration:bool=None, enable_chroma_deltaq:bool=True, arnr_strength:int=2, arnr_max_frames:int=5) -> None
+    ffmpeg.svt(clip:vs.VideoNode, filestr:str, speed:int=6, quantizer:int=32, gop:int=None, lad:int=None, tiles_row:int=None, tiles_col:int=None, sc_detection:bool=False) -> None
+    # The args that default to None are actually "Auto"
 
 ### Read images.
     imwri_src(dir:str, fpsnum:int, fpsden:int, firstnum:int=0, alpha:bool=False) -> vs.VideoNode

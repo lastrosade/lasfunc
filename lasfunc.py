@@ -1,5 +1,5 @@
 import vapoursynth as vs
-import math, os
+import math, os, subprocess
 from typing import Optional, Union
 
 # import havsfunc
@@ -9,16 +9,78 @@ from typing import Optional, Union
 # Requriements: imwri, mvtools, fmtc
 
 # https://github.com/vapoursynth/vs-imwri/blob/master/docs/imwri.rst
-# https://amusementclub.github.io/fmtconv/doc/fmtconv.html
+# https://github.com/dubhater/vapoursynth-mvtools
 # http://avisynth.org.ru/mvtools/mvtools2.html
 
-# TODO: Bring in more functions,
-    # havsfunc:
-        # HQDeringmod
+# TODO: Bring in more functions, native way to encode ffv1/av1? sounds hard af.
+    # from havsfunc: HQDeringmod
 
-def write_to_file(clip:vs.VideoNode, filestr:str) -> None:
-    with open(filestr, 'wb') as file:
-        clip.output(file, y4m=True)
+class ffmpeg:
+    # TODO: Handle rgb.
+
+    def __get_progress__(a, b):
+        s = "Progress: {}% {}/{}".format(str(math.floor((a/b)*100)).rjust(3,' '), str(a).rjust(str(b).__len__(),' '), b)
+        print(s, end="\r")
+
+    def aom(clip:vs.VideoNode, filestr:str, speed:int=3, quantizer:int=32, gop:int=None, lif:int=None, tiles_row:int=None, tiles_col:int=None, enable_cdef:bool=True, enable_restoration:bool=None, enable_chroma_deltaq:bool=True, arnr_strength:int=2, arnr_max_frames:int=5):
+        if clip.format.name not in ['YUV420P8', 'YUV422P8', 'YUV444P8', 'YUV420P10', 'YUV422P10', 'YUV444P10', 'YUV420P12', 'YUV422P12', 'YUV444P12']:
+            raise ValueError('Pixel format must be one of YUV420P8 YUV422P8 YUV444P8 YUV420P10 YUV422P10 YUV444P10 YUV420P12 YUV422P12 YUV444P12')
+
+        if gop is None: gop = min(300, round(clip.fps.numerator/clip.fps.denominator)*10)
+        if lif is None: lif = min(35, gop)
+        if tiles_row is None: tiles_row = math.floor(clip.height/1080)
+        if tiles_col is None: tiles_col = math.floor(clip.width/1920)
+
+        if enable_restoration is None: 
+            if (clip.height*clip.width >= 3840*2160): # if smaller than 2160p
+                enable_restoration = True
+            else: enable_restoration = False
+
+        aom_params = f"enable-qm=1:qm-min=5"
+
+        if (clip.height*clip.width < 1920*1080): # if smaller than 1080p
+            aom_params += ":max-partition-size=64:sb-size=64"
+
+        ffmpeg_str = f"ffmpeg -y -hide_banner -v 8 -i - -c libaom-av1 \
+-cpu-used {speed} -crf {quantizer} -g {gop} -lag-in-frames {lif} -tile-columns {tiles_col} \
+-tile-rows {tiles_row} -enable-cdef {enable_cdef} -enable-restoration {enable_restoration} \
+-arnr-strength {arnr_strength} -arnr-max-frames {arnr_max_frames} -aom-params \"{aom_params}\" -f ivf -"
+
+        file = open(filestr, 'wb')
+        with subprocess.Popen(ffmpeg_str, stdin=subprocess.PIPE, stdout=file) as process:
+            clip.output(process.stdin, y4m=True, progress_update=ffmpeg.__get_progress__)
+            process.stdin.close()
+        file.close()
+
+    def svt(clip:vs.VideoNode, filestr:str, speed:int=6, quantizer:int=32, gop:int=None, lad:int=None, tiles_row:int=None, tiles_col:int=None, sc_detection:bool=False):
+        if clip.format.name not in ['YUV420P8', 'YUV420P10']:
+            raise ValueError('Pixel format must be one of YUV420P8 YUV420P10')
+
+        if gop is None: gop = min(300, round(clip.fps.numerator/clip.fps.denominator)*10)
+        if lad is None: lad = min(120, gop)
+        if tiles_row is None: tiles_row = math.floor(clip.height/1080)
+        if tiles_col is None: tiles_col = math.floor(clip.width/1920)
+
+        ffmpeg_str = f"ffmpeg -y -hide_banner -v 8 -i - -c libsvtav1 \
+-preset {speed} -rc cqp -qp {quantizer} -g {gop} -la_depth {lad} \
+-tile_rows {tiles_row} -tile_columns {tiles_col} -sc_detection {sc_detection} -f ivf -"
+
+        file = open(filestr, 'wb')
+        with subprocess.Popen(ffmpeg_str, stdin=subprocess.PIPE, stdout=file) as process:
+            clip.output(process.stdin, y4m=True, progress_update=ffmpeg.__get_progress__)
+            process.stdin.close()
+        file.close()
+
+    def ffv1(clip:vs.VideoNode, filestr:str):
+        if clip.format.name not in ['YUV420P8', 'YUV422P8', 'YUV444P8', 'YUV420P10', 'YUV422P10', 'YUV444P10', 'YUV420P12', 'YUV422P12', 'YUV444P12', 'YUV420P16', 'YUV422P16', 'YUV444P16']:
+            raise ValueError('Pixel format must be one of YUV420P8 YUV422P8 YUV444P8 YUV420P10 YUV422P10 YUV444P10 YUV420P12 YUV422P12 YUV444P12 YUV420P16 YUV422P16 YUV444P16')
+
+        ffmpeg_str = f"ffmpeg -y -hide_banner -v 8 -i - -c ffv1 -f nut - "
+
+        file = open(filestr, 'wb')
+        with subprocess.Popen(ffmpeg_str, stdin=subprocess.PIPE, stdout=file) as process:
+            clip.output(process.stdin, y4m=True, progress_update=ffmpeg.__get_progress__)
+            process.stdin.close()
         file.close()
 
 def round_to_closest(n:Union[int,float]) -> int:
@@ -55,7 +117,6 @@ def boundary_resize(clip:vs.VideoNode, boundary_width:int, boundary_height:int,
         new_height = round_to_closest((new_width * original_height) / original_width)
 
     resize_func = getattr(vs.core.resize, resize_kernel)
-
     clip = resize_func(clip=clip, height=new_height, width=new_width)
 
     # Make divisible by 2 for vp9 :)
@@ -259,7 +320,7 @@ def mvscd(clip:vs.VideoNode, preset:str='fast', super_pel:int=2,
     clip = vs.core.mv.SCDetection(clip, vectors=vectors, thscd1=thscd1, thscd2=int(thscd2*255/100))
     return clip
 
-def mvmi(clip:vs.VideoNode, fpsnum:int=60000, fpsden:int=1001, preset:str='fast', 
+def mvmi(clip:vs.VideoNode, fpsnum:int=60, fpsden:int=1, preset:str='fast', 
         super_pel:int=2, block:bool=True, flow_mask:Optional[int]=None,
         block_mode:Optional[int]=None, Mblur:float=15.0,
 
