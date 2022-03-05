@@ -21,6 +21,7 @@ from typing import Optional, Union
 
 class ffmpeg:
     # TODO: Handle rgb.
+    # TODO: Rewrite yuvtorgb and rgbtoyuv.
 
     def __get_progress__(a, b):
         s = "Progress: {}% {}/{}".format(str(math.floor((a/b)*100)).rjust(3,' '), str(a).rjust(str(b).__len__(),' '), b)
@@ -258,7 +259,7 @@ def bt2390_ictcp(clip:vs.VideoNode, source_peak:Optional[int]=None,
 #    clip = vs.core.resize.Spline36(clip=clip, format=vs.RGBS, transfer_in_s="linear", transfer_s="709", dither_type="none")
     clip = vs.core.std.Limiter(clip, 0, 1)
 
-    clip = vs.core.resize.Spline36(clip=clip, format=vs.YUV422P16, matrix_s="709", filter_param_a=0, filter_param_b=0.75, range_in_s="full",range_s="limited", chromaloc_in_s="center", chromaloc_s="center", dither_type="none")  
+    clip = vs.core.resize.Spline36(clip=clip, format=vs.YUV444P16, matrix_s="709", filter_param_a=0, filter_param_b=0.75, range_in_s="full",range_s="limited", chromaloc_in_s="center", chromaloc_s="center", dither_type="none")
     return clip
 
 def imwri_src(dir:str, fpsnum:int, fpsden:int, firstnum:int=0, alpha:bool=False) -> vs.VideoNode:
