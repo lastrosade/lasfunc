@@ -6,14 +6,18 @@ from typing import Optional, Union
 # import kagefunc
 # import mvsfunc
 
-# Requriements: imwri, mvtools, fmtc
+# Requriements: imwri, mvtools, fmtc, 
+# https://github.com/wwww-wwww/vs-noise
+# https://git.kageru.moe/kageru/adaptivegrain
 
+# Docs
 # https://github.com/vapoursynth/vs-imwri/blob/master/docs/imwri.rst
 # https://github.com/dubhater/vapoursynth-mvtools
 # http://avisynth.org.ru/mvtools/mvtools2.html
 
 # TODO: Bring in more functions, native way to encode ffv1/av1? sounds hard af.
     # from havsfunc: HQDeringmod
+    # New adaptive_grain based on https://github.com/wwww-wwww/vs-noise
 
 class ffmpeg:
     # TODO: Handle rgb.
@@ -329,9 +333,9 @@ def mvmi(clip:vs.VideoNode, fpsnum:int=60, fpsden:int=1, preset:str='fast',
         overlap:int=0, overlapv:Optional[int]=None, search:Optional[int]=None,
         dct:int=0, truemotion:bool=True, blksize:int=8, blksizev:int=8, searchparam:int=2,
         badSAD:int=10000, badrange:int=24, divide:int=0) -> vs.VideoNode:
-    # Source: xvs.mvfrc, modified
-
     # mvtools motion interpolation
+
+    # Source: xvs.mvfrc, modified
 
     # TODO: clean variable names, make easier to use. for real I'm never using all of these params.
 
@@ -382,3 +386,16 @@ def mvmi(clip:vs.VideoNode, fpsnum:int=60, fpsden:int=1, preset:str='fast',
     else:
         out = vs.core.mv.FlowFPS(clip, mvsuper, block_vectors, flow_vectors, **block_or_flow_params, mask=flow_mask)
     return out
+
+def adaptive_noise(clip: vs.VideoNode, strength:float=0.25, static:bool=True,
+        luma_scaling:float=12.0, show_mask:bool=False, noise_type:int=2) -> vs.VideoNode:
+    # Based on kagefunc's
+    # https://kageru.moe/blog/article/adaptivegrain
+    # uses https://github.com/wwww-wwww/vs-noise
+
+    mask = vs.core.adg.Mask(clip.std.PlaneStats(), luma_scaling)
+    grained = vs.core.noise.Add(clip, var=strength, constant=static, type=noise_type)
+    if show_mask:
+        return mask
+
+    return vs.core.std.MaskedMerge(clip, grained, mask)
