@@ -22,7 +22,7 @@ class ffmpeg:
         s = "Progress: {}% {}/{}".format(str(math.floor((a/b)*100)).rjust(3,' '), str(a).rjust(str(b).__len__(),' '), b)
         print(s, end="\r")
 
-    def aom(clip:vs.VideoNode, filestr:str, speed:int=3, quantizer:int=32, gop:int=None, lif:int=None, tiles_row:int=None, tiles_col:int=None, enable_cdef:bool=True, enable_restoration:bool=None, enable_chroma_deltaq:bool=True, arnr_strength:int=2, arnr_max_frames:int=5):
+    def aom(clip:vs.VideoNode, filestr:str, speed:int=4, quantizer:int=32, gop:int=None, lif:int=None, tiles_row:int=None, tiles_col:int=None, enable_cdef:bool=True, enable_restoration:bool=None, enable_chroma_deltaq:bool=True, arnr_strength:int=2, arnr_max_frames:int=5):
         if clip.format.name not in ['YUV420P8', 'YUV422P8', 'YUV444P8', 'YUV420P10', 'YUV422P10', 'YUV444P10', 'YUV420P12', 'YUV422P12', 'YUV444P12']:
             raise ValueError('Pixel format must be one of YUV420P8 YUV422P8 YUV444P8 YUV420P10 YUV422P10 YUV444P10 YUV420P12 YUV422P12 YUV444P12')
 
