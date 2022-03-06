@@ -21,7 +21,6 @@ from typing import Optional, Union
 
 class ffmpeg:
     # TODO: Handle rgb.
-    # TODO: Rewrite yuvtorgb and rgbtoyuv.
 
     def __get_progress__(a, b):
         s = "Progress: {}% {}/{}".format(str(math.floor((a/b)*100)).rjust(3,' '), str(a).rjust(str(b).__len__(),' '), b)
@@ -43,7 +42,9 @@ class ffmpeg:
 
         aom_params = f"enable-qm=1:qm-min=5"
 
-        if (clip.height*clip.width < 1920*1080): # if smaller than 1080p
+        if (clip.height*clip.width < 1280*720):
+            aom_params += ":max-partition-size=64:sb-size=32"
+        elif (clip.height*clip.width < 1920*1080): # if smaller than 1080p
             aom_params += ":max-partition-size=64:sb-size=64"
 
         ffmpeg_str = f"ffmpeg -y -hide_banner -v 8 -i - -c libaom-av1 \
@@ -269,20 +270,6 @@ def imwri_src(dir:str, fpsnum:int, fpsden:int, firstnum:int=0, alpha:bool=False)
     clip = vs.core.std.AssumeFPS(clip=clip, fpsnum=fpsnum, fpsden=fpsden)
     return clip
 
-def yuvtorgb(clip:vs.VideoNode, bits:int=32) -> vs.VideoNode:
-
-    clip = vs.core.fmtc.resample(clip=clip, css="444")
-    clip = vs.core.fmtc.matrix(clip=clip, mat="709", col_fam=vs.RGB)
-    clip = vs.core.fmtc.bitdepth(clip=clip, bits=bits)
-    return clip
-
-def rgbtoyuv(clip:vs.VideoNode, bits:int=16, css:str="444") -> vs.VideoNode:
-
-    clip = vs.core.fmtc.matrix(clip, mat="709", fulls=True, fulld=False, col_fam=vs.YUV)
-    clip = vs.core.fmtc.resample(clip, css=css)
-    clip = vs.core.fmtc.bitdepth(clip, bits=bits)
-    return clip
-
 def mvscd(clip:vs.VideoNode, preset:str='fast', super_pel:int=2,
 
         thscd1:int=140, thscd2:int=15,
@@ -292,8 +279,28 @@ def mvscd(clip:vs.VideoNode, preset:str='fast', super_pel:int=2,
         searchparam:int=2, badSAD:int=10000, badrange:int=24, divide:int=0) -> vs.VideoNode:
     # mvtools scene detection
 
-    # thSCD1 (int): threshold which decides whether a block has changed between the previous frame and the current one. When a block has changed, it means that motion estimation for it isn't relevant. It occurs for example at scene changes. So it is one of the thresholds used to tweak the scene changes detection engine. Raising it will lower the number of blocks detected as changed. It may be useful for noisy or flickered video. The threshold is compared to the SAD (Sum of Absolute Differences, a value which says how bad the motion estimation was ) value. For exactly identical blocks we have SAD=0. But real blocks are always different because of objects complex movement (zoom, rotation, deformation), discrete pixels sampling, and noise. Suppose we have two compared 8x8 blocks with every pixel different by 5. It this case SAD will be 8x8x5 = 320 (block will not detected as changed for thSCD1=400). If you use 4x4 blocks, SAD will be 320/4. If you use 16x16 blocks, SAD will be 320*4. Really this parameter is scaled internally in MVTools, and you must always use reduced to block size 8x8 value. Default is 400 (since v.1.4.1).
-    # thSCD2 (int): threshold which sets how many blocks have to change for the frame to be considered as a scene change. It is ranged from 0 to 255, 0 meaning 0 %, 255 meaning 100 %. Default is 130 ( which means 51 % ). 
+    # thSCD1 (int): threshold which decides whether a block has changed between
+    # the previous frame and the current one. When a block has changed,
+    # it means that motion estimation for it isn't relevant.
+    # It occurs for example at scene changes. So it is one of the thresholds
+    # used to tweak the scene changes detection engine. Raising it will lower
+    # the number of blocks detected as changed. It may be useful for noisy or
+    # flickered video. The threshold is compared to the SAD
+    # (Sum of Absolute Differences, a value which says how bad the motion
+    # estimation was ) value. For exactly identical blocks we have SAD=0.
+    # But real blocks are always different because of objects complex movement
+    # (zoom, rotation, deformation), discrete pixels sampling, and noise.
+    # Suppose we have two compared 8x8 blocks with every pixel different by 5.
+    # It this case SAD will be 8x8x5 = 320 (block will not detected
+    # as changed for thSCD1=400). If you use 4x4 blocks,
+    # SAD will be 320/4. If you use 16x16 blocks, SAD will be 320*4.
+    # Really this parameter is scaled internally in MVTools, and you must
+    # always use reduced to block size 8x8 value. Default is 400 (since v.1.4.1).
+
+    # thSCD2 (int): threshold which sets how many blocks have to change
+    # for the frame to be considered as a scene change.
+    # It is ranged from 0 to 255, 0 meaning 0 %, 255 meaning 100 %.
+    # Default is 130 ( which means 51 % ). 
 
     if preset == 'fast':
         preset_number = 0
