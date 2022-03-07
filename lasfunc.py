@@ -1,6 +1,6 @@
 import vapoursynth as vs
 import math, os, subprocess
-from typing import Optional, Union
+from typing import Optional, Union, List
 
 # import havsfunc
 # import kagefunc
@@ -19,14 +19,149 @@ from typing import Optional, Union
     # from havsfunc: HQDeringmod
     # New adaptive_grain based on https://github.com/wwww-wwww/vs-noise
 
-class ffmpeg:
-    # TODO: Handle rgb.
+class util:
+    # stolen from vsutil btw.
+
+    def plane(clip: vs.VideoNode, planeno: int, /) -> vs.VideoNode:
+        if clip.format.num_planes == 1 and planeno == 0:
+            return clip
+        return vs.core.std.ShufflePlanes(clip, planeno, vs.GRAY)
+
+    def join(planes: List[vs.VideoNode], family: vs.ColorFamily = vs.YUV) -> vs.VideoNode:
+        if family not in [vs.RGB, vs.YUV]:
+            raise ValueError('Color family must have 3 planes.')
+        return vs.core.std.ShufflePlanes(clips=planes, planes=[0, 0, 0], colorfamily=family)
+
+    def split(clip: vs.VideoNode, /) -> List[vs.VideoNode]:
+        return [util.plane(clip, x) for x in range(clip.format.num_planes)]
+
+class output:
+    def rav1e(clip: vs.VideoNode, filestr:str, speed:int=6, scd_speed:int=1,
+            quantizer:int=100, gop:int=None, tiles_row:int=None, tiles_col:int=None,
+            color_range:str=None, primaties:str=None, transfer:str=None,
+            matrix:str=None, mastering_display:str=None, content_light:str=None):
+            # two_pass:bool=False, two_pass_file:str=None
+
+        if clip.format.name not in ['YUV420P8', 'YUV422P8', 'YUV444P8', 'YUV420P10', 'YUV422P10', 'YUV444P10', 'YUV420P12', 'YUV422P12', 'YUV444P12']:
+            raise ValueError('Pixel format must be one of YUV420P8 YUV422P8 YUV444P8 YUV420P10 YUV422P10 YUV444P10 YUV420P12 YUV422P12 YUV444P12')
+
+        if gop is None: gop = min(300, round(clip.fps.numerator/clip.fps.denominator)*10)
+
+        rav1e_str = f"rav1e - -o - --quantizer {quantizer} --speed {speed} --scd_speed {scd_speed} --keyint {gop}"
+
+        if color_range is not None: rav1e_str = f"{rav1e_str} --range {color_range}"
+        if primaties is not None: rav1e_str = f"{rav1e_str} --primaries {primaties}"
+        if transfer is not None: rav1e_str = f"{rav1e_str} --transfer {transfer}"
+        if matrix is not None: rav1e_str = f"{rav1e_str} --matrix {matrix}"
+        if mastering_display is not None: rav1e_str = f"{rav1e_str} --mastering-display {mastering_display}"
+        if content_light is not None: rav1e_str = f"{rav1e_str} --content-light {content_light}"
+        if tiles_row is not None: tiles_row = f"{rav1e_str} --tile-rows {tiles_row}"
+        if tiles_col is not None: tiles_col = f"{rav1e_str} --tile-cols {tiles_col}"
+
+        # if two_pass_file is None: two_pass_file = f"{filestr}.rav1etwopasslog"
+        # if two_pass: 
+        #     rav1e_str_fp = f"{rav1e_str} --first-pass '{two_pass_file}'"
+        #     rav1e_str_sp = f"{rav1e_str} --second-pass '{two_pass_file}'"
+        #     file = open(filestr, 'wb')
+        #     print(rav1e_str_fp)
+        #     with subprocess.Popen(rav1e_str_fp, stdin=subprocess.PIPE, stdout=file) as process:
+        #         clip.output(process.stdin, y4m=True)
+        #         process.stdin.close()
+        #     print(rav1e_str_sp)
+        #     with subprocess.Popen(rav1e_str_sp, stdin=subprocess.PIPE, stdout=file) as process:
+        #         clip.output(process.stdin, y4m=True)
+        #         process.stdin.close()
+        #     file.close()
+        # else:
+        file = open(filestr, 'wb')
+        print(rav1e_str)
+        with subprocess.Popen(rav1e_str, stdin=subprocess.PIPE, stdout=file) as process:
+            clip.output(process.stdin, y4m=True)
+            process.stdin.close()
+        file.close()
+
+    def aomenc(clip: vs.VideoNode, filestr:str, speed:int=4, quantizer:int=32,
+            bitrate_min:int=1500, bitrate_mid:int=2000, bitrate_max:int=2500, usage:str="q",
+            gop:int=None, lif:int=None, tiles_row:int=None, tiles_col:int=None,
+            enable_cdef:bool=True, enable_restoration:bool=None, 
+            enable_chroma_deltaq:bool=True, arnr_strength:int=2, arnr_max_frames:int=5):
+
+        # Only Q or VBR
+
+        if clip.format.name not in ['YUV420P8', 'YUV422P8', 'YUV444P8', 'YUV420P10', 'YUV422P10', 'YUV444P10', 'YUV420P12', 'YUV422P12', 'YUV444P12']:
+            raise ValueError('Pixel format must be one of YUV420P8 YUV422P8 YUV444P8 YUV420P10 YUV422P10 YUV444P10 YUV420P12 YUV422P12 YUV444P12')
+
+        if (clip.format.name in ["YUV420P8", "YUV420P10"]):
+            profile=0
+        elif (clip.format.name in ["YUV444P8", "YUV444P10"]):
+            profile=1
+        elif (clip.format.name in ["YUV422P8", "YUV422P10", "YUV422P12", "YUV420P12", "YUV444P12"]):
+            profile=2
+
+        if gop is None: gop = min(300, round(clip.fps.numerator/clip.fps.denominator)*10)
+        if lif is None: lif = min(35, gop)
+        if tiles_row is None: tiles_row = math.floor(clip.height/1080)
+        if tiles_col is None: tiles_col = math.floor(clip.width/1920)
+
+        if usage == "q":
+            quantizer_str = f"--end-usage=q --cq-level={quantizer}"
+        elif usage == "vbr":
+            bitrate_undershoot_pct = round_to_closest(((bitrate_mid - bitrate_min) / bitrate_min)*100)
+            bitrate_overshoot_pct = round_to_closest(((bitrate_max - bitrate_mid) / bitrate_mid)*100)
+            quantizer_str = f"--end-usage=vbr --bias-pct=75 --target-bitrate={bitrate} --undershoot-pct={bitrate_undershoot_pct} --overshoot-pct={bitrate_overshoot_pct}"
+
+        if enable_cdef: enable_cdef = 1
+        else: enable_cdef = 0
+        if enable_chroma_deltaq: enable_chroma_deltaq = 1
+        else: enable_chroma_deltaq = 0
+
+        if enable_restoration is None: 
+            if (clip.height*clip.width >= 3200*2000) or not enable_restoration: # if smaller than 2160p
+                enable_restoration = 0
+            else: enable_restoration = 1
+
+        if (clip.height*clip.width < 1280*720):
+            parts_str = "--max-partition-size=64 --sb-size=32"
+        elif (clip.height*clip.width < 1920*1080):
+            parts_str = "--max-partition-size=64 --sb-size=64"
+        else:
+            parts_str = ""
+
+        input_str = f"--fps={clip.fps.numerator}/{clip.fps.denominator} \
+        --input-chroma-subsampling-x={clip.format.subsampling_w} \
+        --input-chroma-subsampling-y={clip.format.subsampling_h} \
+        --input-bit-depth={clip.format.bits_per_sample}"
+
+        general_str = f"--kf-max-dist={gop} --lag-in-frames={lif} --row-mt=1 \
+        --tile-columns={tiles_row} --tile-rows={tiles_col} --min-q=1 \
+        --enable-fwd-kf=1 --quant-b-adapt=1 --enable-chroma-deltaq={enable_chroma_deltaq} \
+        --enable-qm=1 --qm-min=5 --enable-cdef={enable_cdef} --enable-dual-filter=0 \
+        --enable-restoration={enable_restoration} --arnr-strength={arnr_strength} \
+        --arnr-maxframes={arnr_max_frames}"
+        
+        aomenc_str = f"aomenc - --ivf --passes=1 {input_str} --profile={profile} \
+        --bit-depth={clip.format.bits_per_sample} --cpu-used={speed} \
+        {quantizer_str} {general_str} {parts_str} -o -"
+
+        print(aomenc_str)
+        file = open(filestr, 'wb')
+        with subprocess.Popen(aomenc_str, stdin=subprocess.PIPE, stdout=file) as process:
+            clip.output(process.stdin, y4m=True)
+            process.stdin.close()
+        file.close()
+
 
     def __get_progress__(a, b):
         s = "Progress: {}% {}/{}".format(str(math.floor((a/b)*100)).rjust(3,' '), str(a).rjust(str(b).__len__(),' '), b)
         print(s, end="\r")
 
-    def aom(clip:vs.VideoNode, filestr:str, speed:int=4, quantizer:int=32, gop:int=None, lif:int=None, tiles_row:int=None, tiles_col:int=None, enable_cdef:bool=True, enable_restoration:bool=None, enable_chroma_deltaq:bool=True, arnr_strength:int=2, arnr_max_frames:int=5):
+    def aom(clip:vs.VideoNode, filestr:str, speed:int=4, quantizer:int=32,
+            gop:int=None, lif:int=None, tiles_row:int=None, tiles_col:int=None,
+            enable_cdef:bool=True, enable_restoration:bool=None, 
+            enable_chroma_deltaq:bool=True, arnr_strength:int=2,
+            arnr_max_frames:int=5, mux:str='ivf'):
+        #   TODO: Handle rgb.
+
         if clip.format.name not in ['YUV420P8', 'YUV422P8', 'YUV444P8', 'YUV420P10', 'YUV422P10', 'YUV444P10', 'YUV420P12', 'YUV422P12', 'YUV444P12']:
             raise ValueError('Pixel format must be one of YUV420P8 YUV422P8 YUV444P8 YUV420P10 YUV422P10 YUV444P10 YUV420P12 YUV422P12 YUV444P12')
 
@@ -36,7 +171,7 @@ class ffmpeg:
         if tiles_col is None: tiles_col = math.floor(clip.width/1920)
 
         if enable_restoration is None: 
-            if (clip.height*clip.width >= 3840*2160): # if smaller than 2160p
+            if (clip.height*clip.width >= 3200*2000): # if smaller than 2160p
                 enable_restoration = True
             else: enable_restoration = False
 
@@ -47,18 +182,18 @@ class ffmpeg:
         elif (clip.height*clip.width < 1920*1080): # if smaller than 1080p
             aom_params += ":max-partition-size=64:sb-size=64"
 
-        ffmpeg_str = f"ffmpeg -y -hide_banner -v 8 -i - -c libaom-av1 \
--cpu-used {speed} -crf {quantizer} -g {gop} -lag-in-frames {lif} -tile-columns {tiles_col} \
--tile-rows {tiles_row} -enable-cdef {enable_cdef} -enable-restoration {enable_restoration} \
--arnr-strength {arnr_strength} -arnr-max-frames {arnr_max_frames} -aom-params \"{aom_params}\" -f ivf -"
+        ffmpeg_str = f"ffmpeg -y -hide_banner -v 8 -i - -c libaom-av1 -cpu-used {speed} -crf {quantizer} -g {gop} -lag-in-frames {lif} -tile-columns {tiles_col} -tile-rows {tiles_row} -enable-cdef {enable_cdef} -enable-restoration {enable_restoration} -arnr-strength {arnr_strength} -arnr-max-frames {arnr_max_frames} -aom-params \"{aom_params}\" -f {mux} -"
 
         file = open(filestr, 'wb')
         with subprocess.Popen(ffmpeg_str, stdin=subprocess.PIPE, stdout=file) as process:
-            clip.output(process.stdin, y4m=True, progress_update=ffmpeg.__get_progress__)
+            clip.output(process.stdin, y4m=True, progress_update=output.__get_progress__)
             process.stdin.close()
         file.close()
 
-    def svt(clip:vs.VideoNode, filestr:str, speed:int=6, quantizer:int=32, gop:int=None, lad:int=None, tiles_row:int=None, tiles_col:int=None, sc_detection:bool=False):
+    def svt(clip:vs.VideoNode, filestr:str, speed:int=6, quantizer:int=32,
+            gop:int=None, lad:int=None, tiles_row:int=None, tiles_col:int=None,
+            sc_detection:bool=False, mux:str='ivf'):
+
         if clip.format.name not in ['YUV420P8', 'YUV420P10']:
             raise ValueError('Pixel format must be one of YUV420P8 YUV420P10')
 
@@ -67,13 +202,11 @@ class ffmpeg:
         if tiles_row is None: tiles_row = math.floor(clip.height/1080)
         if tiles_col is None: tiles_col = math.floor(clip.width/1920)
 
-        ffmpeg_str = f"ffmpeg -y -hide_banner -v 8 -i - -c libsvtav1 \
--preset {speed} -rc cqp -qp {quantizer} -g {gop} -la_depth {lad} \
--tile_rows {tiles_row} -tile_columns {tiles_col} -sc_detection {sc_detection} -f ivf -"
+        ffmpeg_str = f"ffmpeg -y -hide_banner -v 8 -i - -c libsvtav1 -preset {speed} -rc cqp -qp {quantizer} -g {gop} -la_depth {lad} -tile_rows {tiles_row} -tile_columns {tiles_col} -sc_detection {sc_detection} -f {mux} -"
 
         file = open(filestr, 'wb')
         with subprocess.Popen(ffmpeg_str, stdin=subprocess.PIPE, stdout=file) as process:
-            clip.output(process.stdin, y4m=True, progress_update=ffmpeg.__get_progress__)
+            clip.output(process.stdin, y4m=True, progress_update=output.__get_progress__)
             process.stdin.close()
         file.close()
 
@@ -85,7 +218,7 @@ class ffmpeg:
 
         file = open(filestr, 'wb')
         with subprocess.Popen(ffmpeg_str, stdin=subprocess.PIPE, stdout=file) as process:
-            clip.output(process.stdin, y4m=True, progress_update=ffmpeg.__get_progress__)
+            clip.output(process.stdin, y4m=True, progress_update=output.__get_progress__)
             process.stdin.close()
         file.close()
 
@@ -134,6 +267,12 @@ def boundary_resize(clip:vs.VideoNode, boundary_width:int, boundary_height:int,
                 clip = vs.core.std.CropAbs(clip=clip, height=new_height_div,
                                                         width=new_width_div)
     return clip
+
+# def down_to_444(clip:vs.VideoNode) -> int:
+#     (y, u, v) = util.split(clip)
+#     y = vs.core.resize.Bilinear(y, width=clip.width/2, height=clip.height/2)
+#     clip = util.join((y, u, v), vs.YUV)
+#     return clip
 
 def bt2390_ictcp(clip:vs.VideoNode, source_peak:Optional[int]=None,
         target_nits:float=1) -> vs.VideoNode:
@@ -257,7 +396,7 @@ def bt2390_ictcp(clip:vs.VideoNode, source_peak:Optional[int]=None,
 
     clip = vs.core.std.Expr(clips=[clip], expr="x 1 2.2 / pow")
 
-#    clip = vs.core.resize.Spline36(clip=clip, format=vs.RGBS, transfer_in_s="linear", transfer_s="709", dither_type="none")
+    # clip = vs.core.resize.Spline36(clip=clip, format=vs.RGBS, transfer_in_s="linear", transfer_s="709", dither_type="none")
     clip = vs.core.std.Limiter(clip, 0, 1)
 
     clip = vs.core.resize.Spline36(clip=clip, format=vs.YUV444P16, matrix_s="709", filter_param_a=0, filter_param_b=0.75, range_in_s="full",range_s="limited", chromaloc_in_s="center", chromaloc_s="center", dither_type="none")
