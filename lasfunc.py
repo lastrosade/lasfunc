@@ -2,53 +2,458 @@ import vapoursynth as vs
 import math, os, subprocess
 from typing import Optional, Union, List
 
-# import havsfunc
-# import kagefunc
-# import mvsfunc
-
-# Requriements: imwri, mvtools, fmtc, rgvs, flux
-# https://github.com/wwww-wwww/vs-noise
-# https://git.kageru.moe/kageru/adaptivegrain
+# Requriements: imwri, mvtools, fmtc, rgvs, flux, ctmf, vs-noise, adaptivegrain
 
 # Docs
 # https://github.com/vapoursynth/vs-imwri/blob/master/docs/imwri.rst
-# https://github.com/dubhater/vapoursynth-mvtools
 # http://avisynth.org.ru/mvtools/mvtools2.html
+# https://github.com/dubhater/vapoursynth-mvtools
+# https://amusementclub.github.io/fmtconv/doc/fmtconv.html
+# https://github.com/dubhater/vapoursynth-fluxsmooth
+# https://github.com/IFeelBloated/RGSF
+# https://github.com/HomeOfVapourSynthEvolution/VapourSynth-CTMF
+# https://github.com/wwww-wwww/vs-noise
+# https://git.kageru.moe/kageru/adaptivegrain
 
-# TODO: Bring in more functions, native way to encode ffv1/av1? sounds hard af.
-    # from havsfunc: HQDeringmod
-    # New adaptive_grain based on https://github.com/wwww-wwww/vs-noise
+class helper:
+    def round_to_closest(n:Union[int, float]) -> int:
+        # I'm amazed that's not a thing.
+
+        if n - math.floor(n) < 0.5:
+            return math.floor(n)
+        return math.ceil(n)
+
+    def scale_depth(i:int, depth_out:int=16, depth_in:int=8) -> int:
+        # converting the values in one depth to another
+
+        return i*2**(depth_out-depth_in)
+
+    def scale255(value, peak):
+
+        return helper.round_to_closest(value * peak / 255) if peak != 1 else value / 255
 
 class util:
     # stolen from vsutil btw.
 
     def plane(clip:vs.VideoNode, planeno:int) -> vs.VideoNode:
+
         if clip.format.num_planes == 1 and planeno == 0:
             return clip
         return vs.core.std.ShufflePlanes(clip, planeno, vs.GRAY)
 
     def join(planes:List[vs.VideoNode], family:vs.ColorFamily=vs.YUV) -> vs.VideoNode:
+
         if family not in [vs.RGB, vs.YUV]:
             raise vs.Error('Color family must have 3 planes.')
         return vs.core.std.ShufflePlanes(clips=planes, planes=[0, 0, 0], colorfamily=family)
 
     def split(clip:vs.VideoNode) -> List[vs.VideoNode]:
+
         return [util.plane(clip, x) for x in range(clip.format.num_planes)]
+
+    def prewitt(clip:vs.VideoNode, planes:Optional[Union[int, List[int]]]=None):
+
+        if planes is None:
+            planes = list(range(clip.format.num_planes))
+        elif isinstance(planes, int):
+            planes = [planes]
+
+        return vs.core.std.Expr([clip.std.Convolution(matrix=[1, 1, 0, 1, 0, -1, 0, -1, -1], planes=planes, saturate=False),
+                            clip.std.Convolution(matrix=[1, 1, 1, 0, 0, 0, -1, -1, -1], planes=planes, saturate=False),
+                            clip.std.Convolution(matrix=[1, 0, -1, 1, 0, -1, 1, 0, -1], planes=planes, saturate=False),
+                            clip.std.Convolution(matrix=[0, -1, -1, 1, 0, -1, 1, 1, 0], planes=planes, saturate=False)],
+                            expr=['x y max z max a max' if i in planes else '' for i in range(clip.format.num_planes)])
+
+    def mt_expand_multi(src:vs.VideoNode, mode:str='rectangle', 
+        planes:Optional[Union[int, List[int]]]=None, sw:int=1, sh:int=1):
+
+        if isinstance(planes, int):
+            planes = [planes]
+
+        if sw > 0 and sh > 0:
+            mode_m = [0, 1, 0, 1, 1, 0, 1, 0] if mode == 'losange' or (mode == 'ellipse' and (sw % 3) != 1) else [1, 1, 1, 1, 1, 1, 1, 1]
+        elif sw > 0:
+            mode_m = [0, 0, 0, 1, 1, 0, 0, 0]
+        elif sh > 0:
+            mode_m = [0, 1, 0, 0, 0, 0, 1, 0]
+        else:
+            mode_m = None
+
+        if mode_m is not None:
+            src = util.mt_expand_multi(src.std.Maximum(planes=planes, coordinates=mode_m), mode=mode, planes=planes, sw=sw - 1, sh=sh - 1)
+        return src
+
+    def mt_inpand_multi(src:vs.VideoNode, mode:str='rectangle', 
+        planes:Optional[Union[int, List[int]]]=None, sw:int=1, sh:int=1):
+
+        if isinstance(planes, int):
+            planes = [planes]
+
+        if sw > 0 and sh > 0:
+            mode_m = [0, 1, 0, 1, 1, 0, 1, 0] if mode == 'losange' or (mode == 'ellipse' and (sw % 3) != 1) else [1, 1, 1, 1, 1, 1, 1, 1]
+        elif sw > 0:
+            mode_m = [0, 0, 0, 1, 1, 0, 0, 0]
+        elif sh > 0:
+            mode_m = [0, 1, 0, 0, 0, 0, 1, 0]
+        else:
+            mode_m = None
+
+        if mode_m is not None:
+            src = util.mt_inpand_multi(src.std.Minimum(planes=planes, coordinates=mode_m), mode=mode, planes=planes, sw=sw - 1, sh=sh - 1)
+        return src
+
+    def mt_inflate_multi(src:vs.VideoNode, planes:Optional[Union[int, List[int]]]=None, radius:int=1):
+
+        if isinstance(planes, int):
+            planes = [planes]
+
+        for i in range(radius):
+            src = vs.core.std.Inflate(src, planes=planes)
+        return src
+
+    def mt_deflate_multi(src:vs.VideoNode, planes:Optional[Union[int, List[int]]]=None, radius:int=1):
+
+        if isinstance(planes, int):
+            planes = [planes]
+
+        for i in range(radius):
+            src = vs.core.std.Deflate(src, planes=planes)
+        return src
+
+    def check_color_family(color_family:str, valid_list:List[str]=None, invalid_list:Optional[List[str]]=None):
+
+        if valid_list is None:
+            valid_list = ('RGB', 'YUV', 'GRAY')
+        if invalid_list is None:
+            invalid_list = ('COMPAT', 'UNDEFINED')
+        # check invalid list
+        for cf in invalid_list:
+            if color_family == getattr(vs, cf, None):
+                raise value_error(f'color family *{cf}* is not supported!')
+        # check valid list
+        if valid_list:
+            if color_family not in [getattr(vs, cf, None) for cf in valid_list]:
+                raise value_error(f'color family not supported, only {valid_list} are accepted')
+
+    def limit_filter(flt:vs.VideoNode, src:vs.VideoNode, ref:Optional[vs.VideoNode]=None,
+        thr:Optional[float]=None, elast:Optional[float]=None, planes:Optional[Union[int, List[int]]]=None, 
+        brighten_thr:Optional[float]=None, thrc:Optional[float]=None, force_expr:bool=True):
+        # from mvsfunc
+
+        # It acts as a post-processor, and is very useful to limit the difference of filtering while avoiding artifacts.
+        # Commonly used cases:
+        #     de-banding
+        #     de-ringing
+        #     de-noising
+        #     sharpening
+        #     combining high precision source with low precision filtering: util.limit_filter(src, flt, thr=1.0, elast=2.0)
+
+        # There are 2 implementations, default one with std.Expr, the other with std.Lut.
+        # The Expr version supports all mode, while the Lut version doesn't support float input and ref clip.
+        # Also the Lut version will truncate the filtering diff if it exceeds half the value range(128 for 8-bit, 32768 for 16-bit).
+        # The Lut version might be faster than Expr version in some cases, for example 8-bit input and brighten_thr != thr.
+
+        # Basic parameters
+        #     flt {clip}: filtered clip, to compute the filtering diff
+        #         can be of YUV/RGB/Gray color family, can be of 8-16 bit integer or 16/32 bit float
+        #     src {clip}: source clip, to apply the filtering diff
+        #         must be of the same format and dimension as "flt"
+        #     ref {clip} (optional): reference clip, to compute the weight to be applied on filtering diff
+        #         must be of the same format and dimension as "flt"
+        #         default: None (use "src")
+        #     thr {float}: threshold (8-bit scale) to limit filtering diff
+        #         default: 1.0
+        #     elast {float}: elasticity of the soft threshold
+        #         default: 2.0
+        #     planes {int, int[]}: specify which planes to process
+        #         unprocessed planes will be copied from "flt"
+        #         default: all planes will be processed, [0,1,2] for YUV/RGB input, [0] for Gray input
+
+        # Advanced parameters
+        #     brighten_thr {float}: threshold (8-bit scale) for filtering diff that brightening the image (Y/R/G/B plane)
+        #         set a value different from "thr" is useful to limit the overshoot/undershoot/blurring introduced in sharpening/de-ringing
+        #         default is the same as "thr"
+        #     thrc {float}: threshold (8-bit scale) for chroma (U/V/Co/Cg plane)
+        #         default is the same as "thr"
+        #     force_expr {bool}
+        #         - True: force to use the std.Expr implementation
+        #         - False: use the std.Lut implementation if available
+        #         default: True
+
+        def _limit_filter_expr(defref, thr, elast, largen_thr, value_range):
+
+            flt = " x "
+            src = " y "
+            ref = " z " if defref else src
+            
+            dif = f" {flt} {src} - "
+            dif_ref = f" {flt} {ref} - "
+            dif_abs = dif_ref + " abs "
+            
+            thr = thr * value_range / 255
+            largen_thr = largen_thr * value_range / 255
+            
+            if thr <= 0 and largen_thr <= 0:
+                limitExpr = f" {src} "
+            elif thr >= value_range and largen_thr >= value_range:
+                limitExpr = ""
+            else:
+                if thr <= 0:
+                    limitExpr = f" {src} "
+                elif thr >= value_range:
+                    limitExpr = f" {flt} "
+                elif elast <= 1:
+                    limitExpr = f" {dif_abs} {thr} <= {flt} {src} ? "
+                else:
+                    thr_1 = thr
+                    thr_2 = thr * elast
+                    thr_slope = 1 / (thr_2 - thr_1)
+                    # final = src + dif * (thr_2 - dif_abs) / (thr_2 - thr_1)
+                    limitExpr = f" {src} {dif} {thr_2} {dif_abs} - * {thr_slope} * + "
+                    limitExpr = f" {dif_abs} {thr_1} <= {flt} {dif_abs} {thr_2} >= {src} " + limitExpr + " ? ? "
+                
+                if largen_thr != thr:
+                    if largen_thr <= 0:
+                        limitExprLargen = f" {src} "
+                    elif largen_thr >= value_range:
+                        limitExprLargen = f" {flt} "
+                    elif elast <= 1:
+                        limitExprLargen = f" {dif_abs} {largen_thr} <= {flt} {src} ? "
+                    else:
+                        thr_1 = largen_thr
+                        thr_2 = largen_thr * elast
+                        thr_slope = 1 / (thr_2 - thr_1)
+                        # final = src + dif * (thr_2 - dif_abs) / (thr_2 - thr_1)
+                        limitExprLargen = f" {src} {dif} {thr_2} {dif_abs} - * {thr_slope} * + "
+                        limitExprLargen = f" {dif_abs} {thr_1} <= {flt} {dif_abs} {thr_2} >= {src} " + limitExprLargen + " ? ? "
+                    limitExpr = f" {flt} {ref} > " + limitExprLargen + " " + limitExpr + " ? "
+            
+            return limitExpr
+
+        def _limit_diff_lut(diff:vs.VideoNode, thr:float, elast:float,
+            largen_thr:Union[int, float], planes:List[vs.VideoNode]):
+
+            # Get properties of input clip
+            sFormat = diff.format
+
+            sSType = sFormat.sample_type
+            sbitPS = sFormat.bits_per_sample
+            
+            if sSType == vs.INTEGER:
+                neutral = 1 << (sbitPS - 1)
+                value_range = (1 << sbitPS) - 1
+            else:
+                neutral = 0
+                value_range = 1
+
+            # Process
+            thr = thr * value_range / 255
+            largen_thr = largen_thr * value_range / 255
+
+            if thr <= 0 and largen_thr <= 0:
+                return diff
+            elif thr >= value_range / 2 and largen_thr >= value_range / 2:
+                def limitLut(x):
+                    return neutral
+                return vs.core.std.Lut(diff, planes=planes, function=limitLut)
+            elif elast <= 1:
+                def limitLut(x):
+                    dif = x - neutral
+                    dif_abs = abs(dif)
+                    thr_1 = largen_thr if dif > 0 else thr
+                    return neutral if dif_abs <= thr_1 else x
+                return vs.core.std.Lut(diff, planes=planes, function=limitLut)
+            else:
+                def limitLut(x):
+                    dif = x - neutral
+                    dif_abs = abs(dif)
+                    thr_1 = largen_thr if dif > 0 else thr
+                    thr_2 = thr_1 * elast
+                    
+                    if dif_abs <= thr_1:
+                        return neutral
+                    elif dif_abs >= thr_2:
+                        return x
+                    else:
+                        # final = flt - dif * (dif_abs - thr_1) / (thr_2 - thr_1)
+                        thr_slope = 1 / (thr_2 - thr_1)
+                        return round(dif * (dif_abs - thr_1) * thr_slope + neutral)
+                return vs.core.std.Lut(diff, planes=planes, function=limitLut)
+
+        # Get properties of input clip
+        sFormat = flt.format
+        if sFormat.id != src.format.id:
+            raise value_error('"flt" and "src" must be of the same format!')
+        if flt.width != src.width or flt.height != src.height:
+            raise value_error('"flt" and "src" must be of the same width and height!')
+
+        if ref is not None:
+            if sFormat.id != ref.format.id:
+                raise value_error('"flt" and "ref" must be of the same format!')
+            if flt.width != ref.width or flt.height != ref.height:
+                raise value_error('"flt" and "ref" must be of the same width and height!')
+
+        sColorFamily = sFormat.color_family
+        util.check_color_family(sColorFamily)
+        sIsYUV = sColorFamily == vs.YUV
+
+        sSType = sFormat.sample_type
+        sbitPS = sFormat.bits_per_sample
+        sNumPlanes = sFormat.num_planes
+
+        # Parameters
+        if thr is None:
+            thr = 1.0
+        elif isinstance(thr, int) or isinstance(thr, float):
+            if thr < 0:
+                raise value_error('valid range of "thr" is [0, +inf)')
+        else:
+            raise type_error('"thr" must be an int or a float!')
+
+        if elast is None:
+            elast = 2.0
+        elif isinstance(elast, int) or isinstance(elast, float):
+            if elast < 1:
+                raise value_error('valid range of "elast" is [1, +inf)')
+        else:
+            raise type_error('"elast" must be an int or a float!')
+
+        if brighten_thr is None:
+            brighten_thr = thr
+        elif isinstance(brighten_thr, int) or isinstance(brighten_thr, float):
+            if brighten_thr < 0:
+                raise value_error('valid range of "brighten_thr" is [0, +inf)')
+        else:
+            raise type_error('"brighten_thr" must be an int or a float!')
+
+        if thrc is None:
+            thrc = thr
+        elif isinstance(thrc, int) or isinstance(thrc, float):
+            if thrc < 0:
+                raise value_error('valid range of "thrc" is [0, +inf)')
+        else:
+            raise type_error('"thrc" must be an int or a float!')
+
+        if ref is not None or sSType != vs.INTEGER:
+            force_expr = True
+
+        # planes
+        process = [0 for i in range(3)]
+
+        if planes is None:
+            process = [1 for i in range(3)]
+        elif isinstance(planes, int):
+            if planes < 0 or planes >= 3:
+                raise vs.Error(f'valid range of planes is 0 to 3')
+            process[planes] = 1
+        elif isinstance(planes, list):
+            for p in planes:
+                if p < 0 or p >= 3:
+                    raise vs.Error(f'valid range of planes is [0, 3]!')
+                process[p] = 1
+
+        # Process
+        if thr <= 0 and brighten_thr <= 0:
+            if sIsYUV:
+                if thrc <= 0:
+                    return src
+            else:
+                return src
+        if thr >= 255 and brighten_thr >= 255:
+            if sIsYUV:
+                if thrc >= 255:
+                    return flt
+            else:
+                return flt
+        if thr >= 128 or brighten_thr >= 128:
+            force_expr = True
+
+        if force_expr: # implementation with std.Expr
+            valueRange = (1 << sbitPS) - 1 if sSType == vs.INTEGER else 1
+            limitExprY = _limit_filter_expr(ref is not None, thr, elast, brighten_thr, valueRange)
+            limitExprC = _limit_filter_expr(ref is not None, thrc, elast, thrc, valueRange)
+            expr = []
+            for i in range(sNumPlanes):
+                if process[i]:
+                    if i > 0 and (sIsYUV):
+                        expr.append(limitExprC)
+                    else:
+                        expr.append(limitExprY)
+                else:
+                    expr.append("")
+            
+            if ref is None:
+                clip = vs.core.std.Expr([flt, src], expr)
+            else:
+                clip = vs.core.std.Expr([flt, src, ref], expr)
+        else: # implementation with std.MakeDiff, std.Lut and std.MergeDiff
+            diff = vs.core.std.MakeDiff(flt, src, planes=planes)
+            if sIsYUV:
+                if process[0]:
+                    diff = _limit_diff_lut(diff, thr, elast, brighten_thr, [0])
+                if process[1] or process[2]:
+                    _planes = []
+                    if process[1]:
+                        _planes.append(1)
+                    if process[2]:
+                        _planes.append(2)
+                    diff = _limit_diff_lut(diff, thrc, elast, thrc, _planes)
+            else:
+                diff = _limit_diff_lut(diff, thr, elast, brighten_thr, planes)
+            clip = vs.core.std.MakeDiff(flt, diff, planes=planes)
+
+        # Output
+        return clip
+
+    def min_blur(clip:vs.VideoNode, r:int=1, planes:Optional[Union[int, List[int]]]=None):
+        # by Didée (http://avisynth.nl/index.php/MinBlur)
+        # Nifty Gauss/Median combination
+
+        if planes is None:
+            planes = list(range(clip.format.num_planes))
+        elif isinstance(planes, int):
+            planes = [planes]
+
+        matrix1 = [1, 2, 1, 2, 4, 2, 1, 2, 1]
+        matrix2 = [1, 1, 1, 1, 1, 1, 1, 1, 1]
+
+        if r <= 0:
+            RG11 = sbr(clip, planes=planes)
+            RG4 = clip.std.Median(planes=planes)
+        elif r == 1:
+            RG11 = clip.std.Convolution(matrix=matrix1, planes=planes)
+            RG4 = clip.std.Median(planes=planes)
+        elif r == 2:
+            RG11 = clip.std.Convolution(matrix=matrix1, planes=planes).std.Convolution(matrix=matrix2, planes=planes)
+            RG4 = clip.ctmf.CTMF(radius=2, planes=planes)
+        else:
+            RG11 = clip.std.Convolution(matrix=matrix1, planes=planes).std.Convolution(matrix=matrix2, planes=planes).std.Convolution(matrix=matrix2, planes=planes)
+            if clip.format.bits_per_sample == 16:
+                s16 = clip
+                RG4 = clip.fmtc.bitdepth(bits=12, planes=planes, dmode=1).ctmf.CTMF(radius=3, planes=planes).fmtc.bitdepth(bits=16, planes=planes)
+                RG4 = mvf.limit_filter(s16, RG4, thr=0.0625, elast=2, planes=planes)
+            else:
+                RG4 = clip.ctmf.CTMF(radius=3, planes=planes)
+
+        expr = 'x y - x z - * 0 < x x y - abs x z - abs < y z ? ?'
+        return vs.core.std.Expr([clip, RG11, RG4], expr=[expr if i in planes else '' for i in range(clip.format.num_planes)])
 
 class output:
     def rav1e(clip:vs.VideoNode, file_str:str, speed:int=6, scd_speed:int=1,
-            quantizer:int=100, gop:int=None, tiles_row:int=None, tiles_col:int=None,
-            color_range:str=None, primaties:str=None, transfer:str=None,
-            matrix:str=None, mastering_display:str=None, content_light:str=None, exec:str="rav1e"):
-            # two_pass:bool=False, two_pass_file:str=None
+        quantizer:int=100, gop:Optional[int]=None, 
+        tiles_row:Optional[int]=None, tiles_col:Optional[int]=None,
+        color_range:Optional[str]=None, primaties:Optional[str]=None, 
+        transfer:Optional[str]=None, matrix:Optional[str]=None, 
+        mastering_display:Optional[str]=None, content_light:Optional[str]=None, 
+        executable:str="rav1e"):
 
         if clip.format.name not in ['YUV420P8', 'YUV422P8', 'YUV444P8', 'YUV420P10', 'YUV422P10', 'YUV444P10', 'YUV420P12', 'YUV422P12', 'YUV444P12']:
-            raise vs.Error('Pixel format must be one of `YUV420P8 YUV422P8 YUV444P8 YUV420P10 YUV422P10 YUV444P10 YUV420P12 YUV422P12 YUV444P12`')
+            raise vs.Error(f"Pixel format must be one of `YUV420P8, YUV422P8, YUV444P8, YUV420P10, YUV422P10, YUV444P10, YUV420P12, YUV422P12, YUV444P12`  currently {clip.format.name}")
 
         if gop is None: gop = min(300, round(clip.fps.numerator/clip.fps.denominator)*10)
 
         args = [
-            exec,
+            executable,
             "-",
             "-o", "-",
             "--quantizer", f"{quantizer}",
@@ -57,14 +462,14 @@ class output:
             "--keyint", f"{gop}"
         ]
 
-        if color_range       is not None: args += [f"--range {color_range}"]
-        if primaties         is not None: args += [f"--primaries {primaties}"]
-        if transfer          is not None: args += [f"--transfer {transfer}"]
-        if matrix            is not None: args += [f"--matrix {matrix}"]
-        if mastering_display is not None: args += [f"--mastering-display {mastering_display}"]
-        if content_light     is not None: args += [f"--content-light {content_light}"]
-        if tiles_row         is not None: args += [f"--tile-rows {tiles_row}"]
-        if tiles_col         is not None: args += [f"--tile-cols {tiles_col}"]
+        if color_range       is not None: args += ["--range", f"{color_range}"]
+        if primaties         is not None: args += ["--primaries", f"{primaties}"]
+        if transfer          is not None: args += ["--transfer", f"{transfer}"]
+        if matrix            is not None: args += ["--matrix", f"{matrix}"]
+        if mastering_display is not None: args += ["--mastering-display", f"{mastering_display}"]
+        if content_light     is not None: args += ["--content-light", f"{content_light}"]
+        if tiles_row         is not None: args += ["--tile-rows", f"{tiles_row}"]
+        if tiles_col         is not None: args += ["--tile-cols", f"{tiles_col}"]
 
         args += ["-"]
 
@@ -75,16 +480,16 @@ class output:
         file.close()
 
     def aomenc(clip:vs.VideoNode, file_str:str, mux:str="webm", speed:int=4, 
-            usage:str="q", quantizer:int=32, bitrate_min:int=1500,
-            bitrate_mid:int=2000, bitrate_max:int=2500, gop:int=None, lif:int=None,
-            tiles_row:int=None, tiles_col:int=None, enable_cdef:bool=True, 
-            enable_restoration:bool=None, enable_chroma_deltaq:bool=True,
-            arnr_strength:int=2, arnr_max_frames:int=5, exec:str="aomenc"):
-
+        usage:str="q", quantizer:int=32, bitrate_min:int=1500,
+        bitrate_mid:int=2000, bitrate_max:int=2500, gop:Optional[int]=None, 
+        lif:Optional[int]=None, tiles_row:Optional[int]=None,
+        tiles_col:Optional[int]=None, enable_cdef:bool=True,
+        enable_restoration:Optional[bool]=None, enable_chroma_deltaq:bool=True,
+        arnr_strength:int=2, arnr_max_frames:int=5, executable:str="aomenc"):
         # Only Q or VBR
 
         if clip.format.name not in ['YUV420P8', 'YUV422P8', 'YUV444P8', 'YUV420P10', 'YUV422P10', 'YUV444P10', 'YUV420P12', 'YUV422P12', 'YUV444P12']:
-            raise vs.Error('Pixel format must be one of `YUV420P8 YUV422P8 YUV444P8 YUV420P10 YUV422P10 YUV444P10 YUV420P12 YUV422P12 YUV444P12`')
+            raise vs.Error(f"Pixel format must be one of `YUV420P8, YUV422P8, YUV444P8, YUV420P10, YUV422P10, YUV444P10, YUV420P12, YUV422P12, YUV444P12`  currently {clip.format.name}")
 
         if (clip.format.name in ["YUV420P8", "YUV420P10"]):
             profile=0
@@ -104,8 +509,8 @@ class output:
         if usage == "q":
             quantizer_args = ["--end-usage=q", f"--cq-level={quantizer}"]
         elif usage == "vbr":
-            bitrate_undershoot_pct = round_to_closest(((bitrate_mid - bitrate_min) / bitrate_min)*100)
-            bitrate_overshoot_pct = round_to_closest(((bitrate_max - bitrate_mid) / bitrate_mid)*100)
+            bitrate_undershoot_pct = helper.round_to_closest(((bitrate_mid - bitrate_min) / bitrate_min)*100)
+            bitrate_overshoot_pct = helper.round_to_closest(((bitrate_max - bitrate_mid) / bitrate_mid)*100)
             quantizer_args = [
                 "--end-usage=vbr",
                 "--bias-pct=75",
@@ -113,11 +518,11 @@ class output:
                 f"--undershoot-pct={bitrate_undershoot_pct}",
                 f"--overshoot-pct={bitrate_overshoot_pct}"
             ]
+        else:
+            raise vs.Error('Only q and vbr end usages are supported.')
 
-        if enable_cdef: enable_cdef = 1
-        else: enable_cdef = 0
-        if enable_chroma_deltaq: enable_chroma_deltaq = 1
-        else: enable_chroma_deltaq = 0
+        enable_cdef = "1" if enable_cdef else "0"
+        enable_chroma_deltaq = "1" if enable_chroma_deltaq else "0"
 
         if enable_restoration is None: 
             if (clip.height*clip.width >= 3200*2000) or not enable_restoration: # if smaller than 2160p
@@ -132,7 +537,7 @@ class output:
             parts_args = []
 
         args = [
-            exec,
+            executable,
             "-",
             f"--{mux}" ,
             "--passes=1",
@@ -170,91 +575,59 @@ class output:
             process.stdin.close()
         file.close()
 
-    def __get_progress__(a, b):
-        s = f"Progress: {str(math.floor((a/b)*100)).rjust(3,' ')}% {str(a).rjust(str(b).__len__())}/{b}"
-        print(s, end="\r")
+    def __get_progress__(a:int, b:int):
 
-    # def aom(clip:vs.VideoNode, file_str:str, speed:int=4, quantizer:int=32,
-    #         gop:int=None, lif:int=None, tiles_row:int=None, tiles_col:int=None,
-    #         enable_cdef:bool=True, enable_restoration:bool=None, 
-    #         enable_chroma_deltaq:bool=True, arnr_strength:int=2,
-    #         arnr_max_frames:int=5, mux:str='ivf'):
-    #     #   TODO: Handle rgb lmao.
+        print(f"Progress: {str(math.floor((a/b)*100)).rjust(3,' ')}% {str(a).rjust(str(b).__len__())}/{b}", end="\r")
 
-    #     if clip.format.name not in ['YUV420P8', 'YUV422P8', 'YUV444P8', 'YUV420P10', 'YUV422P10', 'YUV444P10', 'YUV420P12', 'YUV422P12', 'YUV444P12']:
-    #         raise vs.Error('Pixel format must be one of `YUV420P8 YUV422P8 YUV444P8 YUV420P10 YUV422P10 YUV444P10 YUV420P12 YUV422P12 YUV444P12`')
+    def __ff_fmt_conv__(vs_format_name:str) -> str:
 
-    #     if gop is None: gop = min(300, round(clip.fps.numerator/clip.fps.denominator)*10)
-    #     if lif is None: lif = min(35, gop)
-    #     if tiles_row is None: tiles_row = math.floor(clip.height/1080)
-    #     if tiles_col is None: tiles_col = math.floor(clip.width/1920)
+        if vs_format_name not in ["YUV411P8","YUV410P8","YUV420P8","YUV422P8","YUV440P8","YUV444P8","YUV420P9","YUV422P9","YUV444P9","YUV420P10","YUV422P10","YUV444P10","YUV420P12","YUV422P12","YUV444P12","YUV420P14","YUV422P14","YUV444P14","YUV420P16","YUV422P16","YUV444P16","Gray8","Gray9","Gray10","Gray12","Gray16","RGB24","RGB27","RGB30","RGB36","RGB42","RGB48"]:
+            raise vs.Error(f"Pixel format must be one of `YUV411P8, YUV410P8, YUV420P8, YUV422P8, YUV440P8, YUV444P8, YUV420P9, YUV422P9, YUV444P9, YUV420P10, YUV422P10, YUV444P10, YUV420P12, YUV422P12, YUV444P12, YUV420P14, YUV422P14, YUV444P14, YUV420P16, YUV422P16, YUV444P16, Gray8, Gray9, Gray10, Gray12, Gray16, RGB24, RGB27, RGB30, RGB36, RGB42, RGB48` currently {clip.format.name}")
 
-    #     if enable_restoration is None: 
-    #         if (clip.height*clip.width >= 3200*2000): # if smaller than 2160p
-    #             enable_restoration = True
-    #         else: enable_restoration = False
-
-    #     aom_params = f"enable-qm=1:qm-min=5"
-
-    #     if (clip.height*clip.width < 1280*720):
-    #         aom_params += ":max-partition-size=64:sb-size=32"
-    #     elif (clip.height*clip.width < 1920*1080): # if smaller than 1080p
-    #         aom_params += ":max-partition-size=64:sb-size=64"
-
-    #     ffmpeg_str = f"ffmpeg -y -hide_banner -v 8 -i - -c libaom-av1 -cpu-used {speed} -crf {quantizer} -g {gop} -lag-in-frames {lif} -tile-columns {tiles_col} -tile-rows {tiles_row} -enable-cdef {enable_cdef} -enable-restoration {enable_restoration} -arnr-strength {arnr_strength} -arnr-max-frames {arnr_max_frames} -aom-params \"{aom_params}\" -f {mux} -"
-
-    #     file = open(file_str, 'wb')
-    #     with subprocess.Popen(ffmpeg_str, stdin=subprocess.PIPE, stdout=file) as process:
-    #         clip.output(process.stdin, y4m=True, progress_update=output.__get_progress__)
-    #         process.stdin.close()
-    #     file.close()
-
-    def svt(clip:vs.VideoNode, file_str:str, speed:int=6, quantizer:int=32,
-            gop:int=None, lad:int=None, tiles_row:int=None, tiles_col:int=None,
-            sc_detection:bool=False, mux:str='nut', exec:str='ffmpeg'):
-
-        if clip.format.name not in ['YUV420P8', 'YUV420P10']:
-            raise vs.Error('Pixel format must be one of `YUV420P8 YUV420P10`')
-
-        if gop is None: gop = min(300, round(clip.fps.numerator/clip.fps.denominator)*10)
-        if lad is None: lad = min(120, gop)
-        if tiles_row is None: tiles_row = math.floor(clip.height/1080)
-        if tiles_col is None: tiles_col = math.floor(clip.width/1920)
-
-        args = [
-            exec,
-            "-y",
-            "-hide_banner",
-            "-v", "8",
-            "-i", "-",
-            "-c", "libsvtav1",
-            "-preset", f"{speed}",
-            "-rc", "cqp",
-            "-qp", f"{quantizer}",
-            "-g", f"{gop}",
-            "-la_depth", f"{lad}",
-            "-tile_rows", f"{tiles_row}",
-            "-tile_columns", f"{tiles_col}",
-            "-sc_detection", f"{sc_detection}",
-            "-f", f"{mux}",
-            "-"
-        ]
-
-        file = open(file_str, 'wb')
-        with subprocess.Popen(args, stdin=subprocess.PIPE, stdout=file) as process:
-            clip.output(process.stdin, y4m=True, progress_update=output.__get_progress__)
-            process.stdin.close()
-        file.close()
+        return {
+            "YUV411P8": "yuv411p",
+            "YUV410P8": "yuv410p",
+            "YUV420P8": "yuv420p",
+            "YUV422P8": "yuv422p",
+            "YUV440P8": "yuv440p",
+            "YUV444P8": "yuv444p",
+            "YUV420P9": "yuv420p9le",
+            "YUV422P9": "yuv422p9le",
+            "YUV444P9": "yuv444p9le",
+            "YUV420P10": "yuv420p10le",
+            "YUV422P10": "yuv422p10le",
+            "YUV444P10": "yuv444p10le",
+            "YUV420P12": "yuv420p12le",
+            "YUV422P12": "yuv422p12le",
+            "YUV444P12": "yuv444p12le",
+            "YUV420P14": "yuv420p14le",
+            "YUV422P14": "yuv422p14le",
+            "YUV444P14": "yuv444p14le",
+            "YUV420P16": "yuv420p16le",
+            "YUV422P16": "yuv422p16le",
+            "YUV444P16": "yuv444p16le",
+            "Gray8": "gray",
+            "Gray9": "gray9le",
+            "Gray10": "gray10le",
+            "Gray12": "gray12le",
+            "Gray16": "gray16le",
+            "RGB24": "gbrp",
+            "RGB27": "gbrp9le",
+            "RGB30": "gbrp10le",
+            "RGB36": "gbrp12le",
+            "RGB42": "gbrp14le",
+            "RGB48": "gbrp16le" 
+        }.get(vs_format_name)
 
     def libx264(clip:vs.VideoNode, file_str:str, preset:str='veryslow', crf:int=7, 
-            crf_max:int=None, gop:int=None, threads:int=3, 
-            rc_lookahead:int=None, mux:str='nut', exec:str='ffmpeg'):
+            crf_max:Optional[int]=None, gop:Optional[int]=None, threads:int=3, 
+            rc_lookahead:Optional[int]=None, mux:str='nut', executable:str='ffmpeg'):
 
         if clip.format.name not in ['YUV420P8', 'YUV422P8', 'YUV444P8', 'YUV420P10', 'YUV422P10', 'YUV444P10']:
-            raise vs.Error('Pixel format must be one of `YUV420P8 YUV420P10`')
+            raise vs.Error(f"Pixel format must be one of `YUV420P8, YUV420P10` currently {clip.format.name}")
 
         args = [
-            exec,
+            executable,
             "-y",
             "-hide_banner",
             "-v", "8",
@@ -279,13 +652,13 @@ class output:
             process.stdin.close()
         file.close()
 
-    def llx264(clip:vs.VideoNode, file_str:str, preset:str='veryslow', mux:str='nut', exec:str='ffmpeg'):
+    def llx264(clip:vs.VideoNode, file_str:str, preset:str='veryslow', mux:str='nut', executable:str='ffmpeg'):
 
         if clip.format.name not in ['YUV420P8', 'YUV422P8', 'YUV444P8', 'YUV420P10', 'YUV422P10', 'YUV444P10']:
-            raise vs.Error('Pixel format must be one of `YUV420P8 YUV420P10`')
+            raise vs.Error(f"Pixel format must be one of `YUV420P8, YUV420P10` currently {clip.format.name}")
 
         args = [
-            exec,
+            executable,
             "-y",
             "-hide_banner",
             "-v", "8",
@@ -303,15 +676,28 @@ class output:
             process.stdin.close()
         file.close()
 
-    def ffv1(clip:vs.VideoNode, file_str:str, mux:str='nut', exec:str='ffmpeg'):
-        if clip.format.name not in ['YUV420P8', 'YUV422P8', 'YUV444P8', 'YUV420P10', 'YUV422P10', 'YUV444P10', 'YUV420P12', 'YUV422P12', 'YUV444P12', 'YUV420P16', 'YUV422P16', 'YUV444P16']:
-            raise vs.Error('Pixel format must be one of `YUV420P8 YUV422P8 YUV444P8 YUV420P10 YUV422P10 YUV444P10 YUV420P12 YUV422P12 YUV444P12 YUV420P16 YUV422P16 YUV444P16`')
+    def ffv1(clip:vs.VideoNode, file_str:str, mux:str='nut', executable:str='ffmpeg'):
+
+        if clip.format.name not in ["YUV411P8", "YUV410P8", "YUV420P8", "YUV422P8", "YUV440P8", "YUV444P8", "YUV420P9", "YUV422P9", "YUV444P9", "YUV420P10", "YUV422P10", "YUV444P10", "YUV420P12", "YUV422P12", "YUV444P12", "YUV420P14", "YUV422P14", "YUV444P14", "YUV420P16", "YUV422P16", "YUV444P16", "Gray8", "Gray9", "Gray10", "Gray12", "Gray16", "RGB27", "RGB30", "RGB36", "RGB42", "RGB48"]:
+            raise vs.Error(f"Pixel format must be one of `YUV411P8, YUV410P8, YUV420P8, YUV422P8, YUV440P8, YUV444P8, YUV420P9, YUV422P9, YUV444P9, YUV420P10, YUV422P10, YUV444P10, YUV420P12, YUV422P12, YUV444P12, YUV420P14, YUV422P14, YUV444P14, YUV420P16, YUV422P16, YUV444P16, Gray8, Gray9, Gray10, Gray12, Gray16, RGB27, RGB30, RGB36, RGB42, RGB48` currently {clip.format.name}")
+
+        if clip.format.color_family is vs.RGB:
+            # rgb to gbr
+            clip = util.join([
+                    util.plane(clip, 1), # g
+                    util.plane(clip, 2), # b 
+                    util.plane(clip, 0)  # r
+                ], vs.RGB)
 
         args = [
-            exec,
+            executable,
             "-y",
             "-hide_banner",
             "-v", "8",
+            "-f", "rawvideo",
+            "-pixel_format", f"{output.__ff_fmt_conv__(clip.format.name)}",
+            "-video_size", f"{clip.width}x{clip.height}",
+            "-framerate", f"{clip.fps}",
             "-i", "-",
             "-c", "ffv1",
             "-f", f"{mux}",
@@ -320,24 +706,128 @@ class output:
 
         file = open(file_str, 'wb')
         with subprocess.Popen(args, stdin=subprocess.PIPE, stdout=file) as process:
-            clip.output(process.stdin, y4m=True, progress_update=output.__get_progress__)
+            clip.output(process.stdin, progress_update=output.__get_progress__)
             process.stdin.close()
         file.close()
 
-def round_to_closest(n:Union[int,float]) -> int:
-    # I'm amazed that's not a thing.
-    if n - math.floor(n) < 0.5:
-        return math.floor(n)
-    return math.ceil(n)
+    def libaom(clip:vs.VideoNode, file_str:str, speed:int=4, quantizer:int=32,
+        gop:Optional[int]=None, lif:Optional[int]=None,
+        tiles_row:Optional[int]=None, tiles_col:Optional[int]=None,
+        enable_cdef:bool=True, enable_restoration:Optional[bool]=None, 
+        enable_chroma_deltaq:bool=True, arnr_strength:int=2,
+        arnr_max_frames:int=5, threads:int=4, mux:str='ivf', executable='ffmpeg'):
+
+        if clip.format.name not in ["YUV420P8", "YUV422P8", "YUV444P8", "YUV420P10", "YUV422P10", "YUV444P10", "YUV420P12", "YUV422P12", "YUV444P12", "Gray8", "Gray10", "Gray12", "RGB24", "RGB30", "RGB36"]:
+            raise vs.Error(f"Pixel format must be one of `YUV420P8, YUV422P8, YUV444P8, YUV420P10, YUV422P10, YUV444P10, YUV420P12, YUV422P12, YUV444P12, Gray8, Gray10, Gray12, RGB24, RGB30, RGB36` currently {clip.format.name}")
+
+        if clip.format.color_family is vs.RGB:
+            # rgb to gbr
+            clip = util.join([
+                    util.plane(clip, 1), # g
+                    util.plane(clip, 2), # b 
+                    util.plane(clip, 0)  # r
+                ], vs.RGB)
+
+        if gop is None: gop = min(300, round(clip.fps.numerator/clip.fps.denominator)*10)
+        if lif is None: lif = min(35, gop)
+        if tiles_row is None: tiles_row = math.floor(clip.height/1080)
+        if tiles_col is None: tiles_col = math.floor(clip.width/1920)
+
+        if enable_restoration is None: 
+            if (clip.height*clip.width >= 3200*2000): # if smaller than 2160p
+                enable_restoration = True
+            else: enable_restoration = False
+
+        if (clip.height*clip.width < 1280*720):
+            aom_params = ":max-partition-size=64:sb-size=64"
+        elif (clip.height*clip.width < 1920*1080): # if smaller than 1080p
+            aom_params = ":max-partition-size=64:sb-size=64"
+
+        args = [
+            executable,
+            "-y",
+            "-hide_banner",
+            "-v", "8",
+            "-f", "rawvideo",
+            "-pixel_format", f"{output.__ff_fmt_conv__(clip.format.name)}",
+            "-video_size", f"{clip.width}x{clip.height}",
+            "-framerate", f"{clip.fps}",
+            "-i", "-",
+            "-c", "libaom-av1",
+            "-threads", f"{threads}",
+            "-cpu-used", f"{speed}",
+            "-crf", f"{quantizer}",
+            "-g", f"{gop}",
+            "-lag-in-frames", f"{lif}",
+            "-tile-columns", f"{tiles_col}",
+            "-tile-rows", f"{tiles_row}",
+            "-enable-cdef", f"{enable_cdef}",
+            "-enable-restoration", f"{enable_restoration}",
+            "-arnr-strength", f"{arnr_strength}",
+            "-arnr-max-frames", f"{arnr_max_frames}",
+            "-aom-params", f"enable-qm=1:qm-min=5{aom_params}",
+            "-f", f"{mux}",
+            "-"
+        ]
+
+        file = open(file_str, 'wb')
+        with subprocess.Popen(args, stdin=subprocess.PIPE, stdout=file) as process:
+            clip.output(process.stdin, progress_update=output.__get_progress__)
+            process.stdin.close()
+        file.close()
+
+    def libsvtav1(clip:vs.VideoNode, file_str:str, speed:int=6, quantizer:int=32,
+            gop:Optional[int]=None, lad:Optional[int]=None,
+            tiles_row:Optional[int]=None, tiles_col:Optional[int]=None,
+            sc_detection:bool=False, threads:int=4, mux:str='nut', executable:str='ffmpeg'):
+
+        if clip.format.name not in ['YUV420P8', 'YUV420P10']:
+            raise vs.Error(f"Pixel format must be one of `YUV420P8, YUV420P10` currently {clip.format.name}")
+
+        if gop is None: gop = min(300, round(clip.fps.numerator/clip.fps.denominator)*10)
+        if lad is None: lad = min(120, gop)
+        if tiles_row is None: tiles_row = math.floor(clip.height/1080)
+        if tiles_col is None: tiles_col = math.floor(clip.width/1920)
+
+        args = [
+            executable,
+            "-y",
+            "-hide_banner",
+            "-v", "8",
+            "-f", "rawvideo",
+            "-pixel_format", f"{output.__ff_fmt_conv__(clip.format.name)}",
+            "-video_size", f"{clip.width}x{clip.height}",
+            "-framerate", f"{clip.fps}",
+            "-i", "-",
+            "-c", "libsvtav1",
+            "-threads", f"{threads}",
+            "-preset", f"{speed}",
+            "-rc", "cqp",
+            "-qp", f"{quantizer}",
+            "-g", f"{gop}",
+            "-la_depth", f"{lad}",
+            "-tile_rows", f"{tiles_row}",
+            "-tile_columns", f"{tiles_col}",
+            "-sc_detection", f"{sc_detection}",
+            "-f", f"{mux}",
+            "-"
+        ]
+
+        file = open(file_str, 'wb')
+        with subprocess.Popen(args, stdin=subprocess.PIPE, stdout=file) as process:
+            clip.output(process.stdin, progress_update=output.__get_progress__)
+            process.stdin.close()
+        file.close()
 
 def boundary_pad(clip:vs.VideoNode, boundary_width:int, boundary_height:int) -> vs.VideoNode:
+
     if (boundary_width > clip.width) or (boundary_height > clip.height):
         clip = vs.core.std.AddBorders(clip, left=(boundary_width-clip.width)/2, right=(boundary_width-clip.width)/2, top=(boundary_height-clip.height)/2, bottom=(boundary_height-clip.height)/2)
     return clip
 
 def boundary_resize(clip:vs.VideoNode, boundary_width:int, boundary_height:int, 
-        multiple:int=1, crop:bool=False, 
-        resize_kernel:str="didée") -> vs.VideoNode:
+    multiple:int=1, crop:bool=False, 
+    resize_kernel:str="didée") -> vs.VideoNode:
 
     # Determine rescaling values
     new_height = original_height = clip.height
@@ -348,14 +838,14 @@ def boundary_resize(clip:vs.VideoNode, boundary_width:int, boundary_height:int,
         # scale height to fit instead
         new_height = boundary_height
         # scale width to maintain aspect ratio
-        new_width = round_to_closest((new_height * original_width) / original_height)
+        new_width = helper.round_to_closest((new_height * original_width) / original_height)
 
     # then check if we need to scale even with the new height
     if new_width > boundary_width:
         # scale width to fit
         new_width = boundary_width
         # scale height to maintain aspect ratio
-        new_height = round_to_closest((new_width * original_height) / original_width)
+        new_height = helper.round_to_closest((new_width * original_height) / original_width)
 
     if resize_kernel == "didée":
         # https://forum.doom9.org/showthread.php?p=1748922#post1748922
@@ -375,7 +865,7 @@ def boundary_resize(clip:vs.VideoNode, boundary_width:int, boundary_height:int,
     return clip
 
 def down_to_444(clip:vs.VideoNode, width:Optional[int]=None, height:Optional[int]=None,
-                resize_kernel_y="Spline36", resize_kernel_uv="Spline16") -> vs.VideoNode:
+    resize_kernel_y="Spline36", resize_kernel_uv="Spline16") -> vs.VideoNode:
     # 4k 420 -> 1080p 444
 
     if source.format.color_family != vs.YUV:
@@ -399,16 +889,10 @@ def down_to_444(clip:vs.VideoNode, width:Optional[int]=None, height:Optional[int
     clip = vs.core.std.ShufflePlanes(clips=[y,u,v], planes=[0,0,0], colorfamily=vs.YUV)
     return clip
 
-# def down_to_444(clip:vs.VideoNode) -> int:
-#     (y, u, v) = util.split(clip)
-#     y = vs.core.resize.Bilinear(y, width=clip.width/2, height=clip.height/2)
-#     clip = util.join((y, u, v), vs.YUV)
-#     return clip
-
 def bt2390_ictcp(clip:vs.VideoNode, source_peak:Optional[int]=None,
-        target_nits:float=1) -> vs.VideoNode:
+    target_nits:float=1) -> vs.VideoNode:
     # Stolen from somewhere, idk where.
-    # clip = bt2390-vs.bt2390_ictcp(clip,target_nits=100,source_peak=1000)
+    # clip = bt2390_ictcp(clip,target_nits=100,source_peak=1000)
 
     # TODO: Rewrite this mess, Fix var names names.
 
@@ -537,12 +1021,10 @@ def imwri_src(dir:str, fpsnum:int, fpsden:int, firstnum:int=0, alpha:bool=False)
     return clip
 
 def mv_scene_detection(clip:vs.VideoNode, preset:str='fast', super_pel:int=2,
-
-        thscd1:int=140, thscd2:int=15,
-
-        overlap:int=0, overlapv:Optional[int]=None, search:Optional[int]=None,
-        dct:int=0, truemotion:bool=True, blksize:int=8, blksizev:int=8,
-        searchparam:int=2, badSAD:int=10000, badrange:int=24, divide:int=0) -> vs.VideoNode:
+    thscd1:int=140, thscd2:int=15,
+    overlap:int=0, overlapv:Optional[int]=None, search:Optional[int]=None,
+    dct:int=0, truemotion:bool=True, blksize:int=8, blksizev:int=8,
+    searchparam:int=2, badSAD:int=10000, badrange:int=24, divide:int=0) -> vs.VideoNode:
     # mvtools scene detection
 
     # thSCD1 (int): threshold which decides whether a block has changed between
@@ -603,14 +1085,12 @@ def mv_scene_detection(clip:vs.VideoNode, preset:str='fast', super_pel:int=2,
     return clip
 
 def mv_motion_interpolation(clip:vs.VideoNode, fpsnum:int=60, fpsden:int=1, preset:str='fast', 
-        super_pel:int=2, block:bool=True, flow_mask:Optional[int]=None,
-        block_mode:Optional[int]=None, Mblur:float=15.0,
-
-        thscd1:int=140, thscd2:int=15, blend:bool=True,
-
-        overlap:int=0, overlapv:Optional[int]=None, search:Optional[int]=None,
-        dct:int=0, truemotion:bool=True, blksize:int=8, blksizev:int=8, searchparam:int=2,
-        badSAD:int=10000, badrange:int=24, divide:int=0) -> vs.VideoNode:
+    super_pel:int=2, block:bool=True, flow_mask:Optional[int]=None,
+    block_mode:Optional[int]=None, Mblur:float=15.0,
+    thscd1:int=140, thscd2:int=15, blend:bool=True,
+    overlap:int=0, overlapv:Optional[int]=None, search:Optional[int]=None,
+    dct:int=0, truemotion:bool=True, blksize:int=8, blksizev:int=8, searchparam:int=2,
+    badSAD:int=10000, badrange:int=24, divide:int=0) -> vs.VideoNode:
     # mvtools motion interpolation
 
     # Source: xvs.mvfrc, modified
@@ -672,7 +1152,7 @@ def mv_motion_interpolation(clip:vs.VideoNode, fpsnum:int=60, fpsden:int=1, pres
     return out
 
 def adaptive_noise(clip:vs.VideoNode, strength:float=0.25, static:bool=True,
-        luma_scaling:float=12.0, show_mask:bool=False, noise_type:int=2) -> vs.VideoNode:
+    luma_scaling:float=12.0, show_mask:bool=False, noise_type:int=2) -> vs.VideoNode:
     # Based on kagefunc's
     # https://kageru.moe/blog/article/adaptivegrain
     # uses https://github.com/wwww-wwww/vs-noise
@@ -683,10 +1163,6 @@ def adaptive_noise(clip:vs.VideoNode, strength:float=0.25, static:bool=True,
         return mask
 
     return vs.core.std.MaskedMerge(clip, grained, mask)
-
-def scale(i:int, depth_out:int=16, depth_in:int=8) -> int:
-    # converting the values in one depth to another
-    return i*2**(depth_out-depth_in)
 
 def mv_flux_smooth(clip:vs.VideoNode, temporal_threshold:int=12, 
     super_params:dict={}, analyse_params:dict={}, compensate_params:dict={},
@@ -745,28 +1221,28 @@ def STPressoMC(clip:vs.VideoNode, limit:int=3, bias:int=24, RGVS_mode:int=4,
 
     depth = clip.format.bits_per_sample
     LIM1 = round(limit*100.0/bias-1.0) if limit > 0 else round(100.0/bias)
-    LIM1 = scale(LIM1,depth)
+    LIM1 = helper.scale_depth(LIM1,depth)
     #(limit>0) ? round(limit*100.0/bias-1.0) :  round(100.0/bias)
     LIM2 = 1 if limit < 0 else limit
-    LIM2 = scale(LIM2,depth)
+    LIM2 = helper.scale_depth(LIM2,depth)
     #(limit<0) ? 1 : limit
     BIA = bias
-    BK = scale(back,depth)
+    BK = helper.scale_depth(back,depth)
     TBIA = bias
     TLIM1 = round(temporal_limit*100.0/temporal_bias-1.0) if temporal_limit > 0 else round(100.0/temporal_bias)
-    TLIM1 = scale(TLIM1,depth)
+    TLIM1 = helper.scale_depth(TLIM1,depth)
     #(temporal_limit>0) ? string( round(temporal_limit*100.0/temporal_bias-1.0) ) : string( round(100.0/temporal_bias) )
     TLIM2  = 1 if temporal_limit < 0 else temporal_limit
-    TLIM2 = scale(TLIM2,depth)
+    TLIM2 = helper.scale_depth(TLIM2,depth)
     #(temporal_limit<0) ? "1" : string(temporal_limit)
     clip_rgvs = vs.core.rgvs.RemoveGrain(clip,RGVS_mode)
     ####
     if limit < 0:
-        expr  = f"x y - abs {LIM1} < x x {scale(1, depth)} x y - x y - abs / * - ?"
-        texpr = f"x y - abs {TLIM1} < x x {scale(1, depth)} x y - x y - abs / * - ?"
+        expr  = f"x y - abs {LIM1} < x x {helper.scale_depth(1, depth)} x y - x y - abs / * - ?"
+        texpr = f"x y - abs {TLIM1} < x x {helper.scale_depth(1, depth)} x y - x y - abs / * - ?"
     else:
-        expr  =  f"x y - abs {scale(1, depth)} < x x {LIM1} + y < x {LIM2} + x {LIM1} - y > x {LIM2} - x {scale(100, depth)} {BIA} - * y {BIA} * + {scale(100, depth)} / ? ? ?"
-        texpr =  f"x y - abs {scale(1, depth)} < x x {TLIM1} + y < x {TLIM2} + x {TLIM1} - y > x {TLIM2} - x {scale(100, depth)} {TBIA} - * y {TBIA} * + {scale(100, depth)} / ? ? ?"
+        expr  =  f"x y - abs {helper.scale_depth(1, depth)} < x x {LIM1} + y < x {LIM2} + x {LIM1} - y > x {LIM2} - x {helper.scale_depth(100, depth)} {BIA} - * y {BIA} * + {helper.scale_depth(100, depth)} / ? ? ?"
+        texpr =  f"x y - abs {helper.scale_depth(1, depth)} < x x {TLIM1} + y < x {TLIM2} + x {TLIM1} - y > x {TLIM2} - x {helper.scale_depth(100, depth)} {TBIA} - * y {TBIA} * + {helper.scale_depth(100, depth)} / ? ? ?"
     L=[]
     for plane in range(0,3):
         C = vs.core.std.ShufflePlanes(clip, plane, colorfamily=vs.GRAY)
@@ -788,3 +1264,124 @@ def STPressoMC(clip:vs.VideoNode, limit:int=3, bias:int=24, RGVS_mode:int=4,
         L[0] = vs.core.std.Expr([L[0],Y], bexpr)
     output = vs.core.std.ShufflePlanes(L, [0,0,0], colorfamily=vs.YUV)
     return output
+
+def HQDeringmod(clip:vs.VideoNode, p:Optional[vs.VideoNode]=None,
+    ringmask:Optional[vs.VideoNode]=None, mrad:int=1, msmooth:int=1,
+    incedge:bool=False, mthr:int=60, minp:int=1, nrmode:Optional[int]=None,
+    sharp:int=1, drrep:int=24, thr:float=12.0, elast:float=2.0,
+    darkthr:Optional[float]=None, planes:List[int]=[0], show:bool=False):
+    # original script by mawen1250, taken from havsfunc
+
+    # Applies deringing by using a smart smoother near edges (where ringing occurs) only
+
+    # Parameters:
+    #  mrad    - Expanding of edge mask, higher value means more aggressive processing. Default is 1
+    #  msmooth - Inflate of edge mask, smooth boundaries of mask. Default is 1
+    #  incedge - Whether to include edge in ring mask, by default ring mask only include area near edges. Default is false
+    #  mthr    - Threshold of sobel edge mask, lower value means more aggressive processing. Or define your own mask clip "ringmask". Default is 60
+    #            But for strong ringing, lower value will treat some ringing as edge, which protects this ringing from being processed.
+    #  minp    - Inpanding of sobel edge mask, higher value means more aggressive processing. Default is 1
+    #  nrmode  - Kernel of dering - 1: min_blur(radius=1), 2: min_blur(radius=2), 3: min_blur(radius=3). Or define your own smoothed clip "p". Default is 2 for HD / 1 for SD
+    #  sharp   - Whether to use contra-sharpening to resharp deringed clip, 1-3 represents radius, 0 means no sharpening. Default is 1
+    #  drrep   - Use repair for details retention, recommended values are 24/23/13/12/1. Default is 24
+    #  thr     - The same meaning with "thr" in Dither_limit_dif16, valid value range is [0.0, 128.0]. Default is 12.0
+    #  elast   - The same meaning with "elast" in Dither_limit_dif16, valid value range is [1.0, inf). Default is 2.0
+    #            Larger "thr" will result in more pixels being taken from processed clip
+    #            Larger "thr" will result in less pixels being taken from input clip
+    #            Larger "elast" will result in more pixels being blended from processed&input clip, for smoother merging
+    #  darkthr - Threshold for darker area near edges, set it lower if you think deringing destroys too much lines, etc. Default is thr/4
+    #            When "darkthr" is not equal to "thr", "thr" limits darkening while "darkthr" limits brightening
+    #  planes  - Whether to process the corresponding plane. The other planes will be passed through unchanged. Default is [0]
+    #  show    - Whether to output mask clip instead of filtered clip. Default is false
+
+    if clip.format.color_family == vs.RGB:
+        raise vs.Error('HQDeringmod: RGB format is not supported')
+
+    if p is not None and p.format.id != clip.format.id:
+        raise vs.Error("HQDeringmod: 'p' must be the same format as clip")
+
+    isGray = (clip.format.color_family == vs.GRAY)
+
+    neutral = 1 << (clip.format.bits_per_sample - 1)
+    peak = (1 << clip.format.bits_per_sample) - 1
+
+    if isinstance(planes, int):
+        planes = [planes]
+
+    if nrmode is None:
+        nrmode = 2 if clip.width > 1024 or clip.height > 576 else 1
+    if darkthr is None:
+        darkthr = thr / 4
+
+    # Kernel: Smoothing
+    if p is None:
+        p = util.min_blur(clip, r=nrmode, planes=planes)
+
+    # Post-Process: Contra-Sharpening
+    matrix1 = [1, 2, 1, 2, 4, 2, 1, 2, 1]
+    matrix2 = [1, 1, 1, 1, 1, 1, 1, 1, 1]
+
+    if sharp <= 0:
+        sclp = p
+    else:
+        pre = p.std.Median(planes=planes)
+        if sharp == 1:
+            method = pre.std.Convolution(matrix=matrix1, planes=planes)
+        elif sharp == 2:
+            method = pre.std.Convolution(matrix=matrix1, planes=planes).std.Convolution(matrix=matrix2, planes=planes)
+        else:
+            method = pre.std.Convolution(matrix=matrix1, planes=planes).std.Convolution(matrix=matrix2, planes=planes).std.Convolution(matrix=matrix2, planes=planes)
+        sharpdiff = vs.core.std.MakeDiff(pre, method, planes=planes)
+        allD = vs.core.std.MakeDiff(clip, p, planes=planes)
+        ssDD = vs.core.rgvs.Repair(sharpdiff, allD, mode=[1 if i in planes else 0 for i in range(clip.format.num_planes)])
+        expr = f'x {neutral} - abs y {neutral} - abs <= x y ?'
+        ssDD = vs.core.std.Expr([ssDD, sharpdiff], expr=[expr if i in planes else '' for i in range(clip.format.num_planes)])
+        sclp = vs.core.std.MergeDiff(p, ssDD, planes=planes)
+
+    # Post-Process: Repairing
+    if drrep <= 0:
+        repclp = sclp
+    else:
+        repclp = vs.core.rgvs.Repair(clip, sclp, mode=[drrep if i in planes else 0 for i in range(clip.format.num_planes)])
+
+    # Post-Process: Limiting
+    if (thr <= 0 and darkthr <= 0) or (thr >= 128 and darkthr >= 128):
+        limitclp = repclp
+    else:
+        limitclp = util.limit_filter(repclp, clip, thr=thr, elast=elast, brighten_thr=darkthr, planes=planes)
+
+    # Post-Process: Ringing Mask Generating
+    if ringmask is None:
+        expr = f'x {helper.scale255(mthr, peak)} < 0 x ?'
+        prewittm = util.prewitt(clip, planes=[0]).std.Expr(expr=[expr] if isGray else [expr, ''])
+        fmask = vs.core.misc.Hysteresis(prewittm.std.Median(planes=[0]), prewittm, planes=[0])
+        if mrad > 0:
+            omask = util.mt_expand_multi(fmask, planes=[0], sw=mrad, sh=mrad)
+        else:
+            omask = fmask
+        if msmooth > 0:
+            omask = util.mt_inflate_multi(omask, planes=[0], radius=msmooth)
+        if incedge:
+            ringmask = omask
+        else:
+            if minp > 3:
+                imask = fmask.std.Minimum(planes=[0]).std.Minimum(planes=[0])
+            elif minp > 2:
+                imask = fmask.std.Inflate(planes=[0]).std.Minimum(planes=[0]).std.Minimum(planes=[0])
+            elif minp > 1:
+                imask = fmask.std.Minimum(planes=[0])
+            elif minp > 0:
+                imask = fmask.std.Inflate(planes=[0]).std.Minimum(planes=[0])
+            else:
+                imask = fmask
+            expr = f'x {peak} y - * {peak} /'
+            ringmask = vs.core.std.Expr([omask, imask], expr=[expr] if isGray else [expr, ''])
+
+    # Mask Merging & Output
+    if show:
+        if isGray:
+            return ringmask
+        else:
+            return ringmask.std.Expr(expr=['', repr(neutral)])
+    else:
+        return vs.core.std.MaskedMerge(clip, limitclp, ringmask, planes=planes, first_plane=True)
