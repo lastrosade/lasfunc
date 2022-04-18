@@ -479,47 +479,71 @@ class output:
             process.stdin.close()
         file.close()
 
-    def aomenc(clip:vs.VideoNode, file_str:str, mux:str="webm", speed:int=4, 
-        usage:str="q", quantizer:int=32, bitrate_min:int=1500,
-        bitrate_mid:int=2000, bitrate_max:int=2500, gop:Optional[int]=None, 
-        lif:Optional[int]=None, tiles_row:Optional[int]=None,
-        tiles_col:Optional[int]=None, enable_cdef:bool=True,
-        enable_restoration:Optional[bool]=None, enable_chroma_deltaq:bool=True,
-        arnr_strength:int=2, arnr_max_frames:int=5, executable:str="aomenc"):
-        # Only Q or VBR
+    def aomenc_fp(clip:vs.VideoNode, fpf=str, speed:int=6, executable:str="aomenc"):
 
         if clip.format.name not in ['YUV420P8', 'YUV422P8', 'YUV444P8', 'YUV420P10', 'YUV422P10', 'YUV444P10', 'YUV420P12', 'YUV422P12', 'YUV444P12']:
             raise vs.Error(f"Pixel format must be one of `YUV420P8, YUV422P8, YUV444P8, YUV420P10, YUV422P10, YUV444P10, YUV420P12, YUV422P12, YUV444P12`  currently {clip.format.name}")
 
         if (clip.format.name in ["YUV420P8", "YUV420P10"]):
             profile=0
-        elif (clip.format.name in ["YUV444P8", "YUV444P10"]):
+        elif (clip.format.name in ["YUV444P8", "YUV444P10"]) and monochrome:
             profile=1
         elif (clip.format.name in ["YUV422P8", "YUV422P10", "YUV422P12", "YUV420P12", "YUV444P12"]):
             profile=2
+
+        args = [
+            executable,
+            "-",
+            "--passes=2",
+            "--pass=1",
+            f"--cpu-used={speed}",
+            f"--fps={clip.fps.numerator}/{clip.fps.denominator}",
+            f"--profile={profile}",
+            f"--width={clip.width}",
+            f"--height={clip.height}",
+            f"--input-chroma-subsampling-x={clip.format.subsampling_w}",
+            f"--input-chroma-subsampling-y={clip.format.subsampling_h}",
+            f"--input-bit-depth={clip.format.bits_per_sample}",
+            f"--bit-depth={clip.format.bits_per_sample}",
+            f"--fpf={fpf}",
+            "--output=-"
+        ]
+
+        print(" ".join(args))
+        with subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE) as process:
+            clip.output(process.stdin, y4m=True)
+            process.stdin.close()
+
+    def aomenc(clip:vs.VideoNode, file_str:str, mux:str="webm", speed:int=4, 
+        usage:str="q", quantizer:int=32, bitrate_min:int=1500,
+        bitrate_mid:int=2000, bitrate_max:int=2500, gop:Optional[int]=None, 
+        lif:Optional[int]=None, tiles_row:Optional[int]=None,
+        tiles_col:Optional[int]=None, enable_cdef:bool=True,
+        enable_restoration:Optional[bool]=None, enable_chroma_deltaq:bool=True,
+        arnr_strength:int=2, arnr_max_frames:int=5, resize_mode:Optional[int]=None,
+        superres_mode:Optional[int]=None, tune:Optional[str]=None, tune_content:Optional[str]=None,
+        fpf:Optional[str]=None, monochrome:bool=False, executable:str="aomenc"):
+        # Only Q or VBR
+
+        if clip.format.name not in ['YUV420P8', 'YUV422P8', 'YUV444P8', 'YUV420P10', 'YUV422P10', 'YUV444P10', 'YUV420P12', 'YUV422P12', 'YUV444P12']:
+            raise vs.Error(f"Pixel format must be one of `YUV420P8, YUV422P8, YUV444P8, YUV420P10, YUV422P10, YUV444P10, YUV420P12, YUV422P12, YUV444P12`  currently {clip.format.name}")
+
+        if (clip.format.name in ["YUV420P8", "YUV420P10"]):
+            profile=0 # Main
+        elif (clip.format.name in ["YUV444P8", "YUV444P10"]) and not monochrome:
+            profile=1 # High
+            # No monochrome support here or some reason.
+        else:
+        # elif (clip.format.name in ["YUV422P8", "YUV422P10", "YUV422P12", "YUV420P12", "YUV444P12"]):
+            profile=2 # Professional
 
         if (mux not in ["ivf", "webm", "obu"]):
             raise vs.Error('Muxing container format must be one of `ivf webm obu`')
 
         if gop is None: gop = min(300, round(clip.fps.numerator/clip.fps.denominator)*10)
         if lif is None: lif = min(35, gop)
-        if tiles_row is None: tiles_row = math.floor(clip.height/1080)
-        if tiles_col is None: tiles_col = math.floor(clip.width/1920)
-
-        if usage == "q":
-            quantizer_args = ["--end-usage=q", f"--cq-level={quantizer}"]
-        elif usage == "vbr":
-            bitrate_undershoot_pct = helper.round_to_closest(((bitrate_mid - bitrate_min) / bitrate_min)*100)
-            bitrate_overshoot_pct = helper.round_to_closest(((bitrate_max - bitrate_mid) / bitrate_mid)*100)
-            quantizer_args = [
-                "--end-usage=vbr",
-                "--bias-pct=75",
-                f"--target-bitrate={bitrate}",
-                f"--undershoot-pct={bitrate_undershoot_pct}",
-                f"--overshoot-pct={bitrate_overshoot_pct}"
-            ]
-        else:
-            raise vs.Error('Only q and vbr end usages are supported.')
+        if tiles_row is None: tiles_row = math.floor(clip.height/1080) if clip.height<clip.width else math.floor(clip.height/1920)
+        if tiles_col is None: tiles_col = math.floor(clip.width/1920) if clip.height<clip.width else math.floor(clip.width/1080)
 
         enable_cdef = "1" if enable_cdef else "0"
         enable_chroma_deltaq = "1" if enable_chroma_deltaq else "0"
@@ -529,26 +553,49 @@ class output:
                 enable_restoration = 0
             else: enable_restoration = 1
 
-        if (clip.height*clip.width < 1280*720):
-            parts_args = ["--max-partition-size=64", "--sb-size=64"] # sb-size used to be 32 but now it can't work? `dynamic, 64, 128`
-        elif (clip.height*clip.width < 1920*1080):
-            parts_args = ["--max-partition-size=64", "--sb-size=64"]
-        else:
-            parts_args = []
-
         args = [
             executable,
             "-",
+            # "--rate-hist=1",
             f"--{mux}" ,
-            "--passes=1",
-            f"--profile={profile}",
-            f"--bit-depth={clip.format.bits_per_sample}",
             f"--cpu-used={speed}"
-        ] + quantizer_args + [
+        ]
+
+        if fpf is not None: 
+            args += [
+                "--passes=2",
+                "--pass=2",
+                f"--fpf={fpf}"
+            ]
+        else:
+            args += ["--passes=1"]
+
+        if usage == "q":
+            args += ["--end-usage=q", f"--cq-level={quantizer}"]
+        elif usage == "vbr":
+            args += [
+                "--end-usage=vbr", "--bias-pct=75",
+                f"--target-bitrate={bitrate_mid}",
+                f"--undershoot-pct={helper.round_to_closest(((bitrate_mid - bitrate_min) / bitrate_min)*100)}",
+                f"--overshoot-pct={helper.round_to_closest(((bitrate_max - bitrate_mid) / bitrate_mid)*100)}"
+            ]
+        else:
+            raise vs.Error('Only q and vbr end usages are supported.')
+
+        # if clip.format.color_family == vs.GRAY:
+        #     args+="--monochrome"
+        if monochrome:
+            args += ["--monochrome"]
+
+        args += [
             f"--fps={clip.fps.numerator}/{clip.fps.denominator}",
+            f"--profile={profile}",
+            f"--width={clip.width}",
+            f"--height={clip.height}",
             f"--input-chroma-subsampling-x={clip.format.subsampling_w}",
             f"--input-chroma-subsampling-y={clip.format.subsampling_h}",
             f"--input-bit-depth={clip.format.bits_per_sample}",
+            f"--bit-depth={clip.format.bits_per_sample}",
             f"--kf-max-dist={gop}",
             f"--lag-in-frames={lif}",
             "--row-mt=1",
@@ -559,7 +606,19 @@ class output:
             f"--enable-restoration={enable_restoration}",
             f"--arnr-strength={arnr_strength}",
             f"--arnr-maxframes={arnr_max_frames}",
-        ] + parts_args + [
+        ]
+        
+        # if (clip.height*clip.width < 1280*720):
+        #     args += ["--max-partition-size=64", "--sb-size=64"] # sb-size used to be 32 but now it can't work? `dynamic, 64, 128`
+        if (clip.height*clip.width < 1920*1080):
+            args += ["--max-partition-size=64", "--sb-size=64"]
+
+        if resize_mode is not None: args += [f"--resize-mode={resize_mode}"]
+        if superres_mode is not None: args += [f"--superres-mode={superres_mode}"]
+        if tune is not None: args += [f"--tune={tune}"]
+        if tune_content is not None: args += [f"--tune-content={tune_content}"]
+
+        args += [
             "--min-q=1",
             f"--enable-fwd-kf=1",
             "--quant-b-adapt=1",
@@ -569,9 +628,10 @@ class output:
             "--output=-"
         ]
 
+        print(" ".join(args))
         file = open(file_str, 'wb')
         with subprocess.Popen(args, stdin=subprocess.PIPE, stdout=file) as process:
-            clip.output(process.stdin, y4m=True)
+            clip.output(process.stdin)
             process.stdin.close()
         file.close()
 
@@ -730,8 +790,8 @@ class output:
 
         if gop is None: gop = min(300, round(clip.fps.numerator/clip.fps.denominator)*10)
         if lif is None: lif = min(35, gop)
-        if tiles_row is None: tiles_row = math.floor(clip.height/1080)
-        if tiles_col is None: tiles_col = math.floor(clip.width/1920)
+        tiles_row = math.floor(clip.height/1080) if clip.height<clip.width else math.floor(clip.height/1920)
+        tiles_col = math.floor(clip.width/1920) if clip.height<clip.width else math.floor(clip.width/1080)
 
         if enable_restoration is None: 
             if (clip.height*clip.width >= 3200*2000): # if smaller than 2160p
@@ -819,10 +879,15 @@ class output:
             process.stdin.close()
         file.close()
 
-def boundary_pad(clip:vs.VideoNode, boundary_width:int, boundary_height:int) -> vs.VideoNode:
+def boundary_pad(clip:vs.VideoNode, boundary_width:int, boundary_height:int, x:int=50, y:int=50) -> vs.VideoNode:
 
     if (boundary_width > clip.width) or (boundary_height > clip.height):
-        clip = vs.core.std.AddBorders(clip, left=(boundary_width-clip.width)/2, right=(boundary_width-clip.width)/2, top=(boundary_height-clip.height)/2, bottom=(boundary_height-clip.height)/2)
+        clip = vs.core.std.AddBorders(clip,
+            left   = (boundary_width-clip.width)  *(x/100),
+            right  = (boundary_width-clip.width)  *(1-(x/100)),
+            top    = (boundary_height-clip.height)*(y/100),
+            bottom = (boundary_height-clip.height)*(1-(y/100))
+            )
     return clip
 
 def boundary_resize(clip:vs.VideoNode, boundary_width:int, boundary_height:int, 
@@ -847,21 +912,25 @@ def boundary_resize(clip:vs.VideoNode, boundary_width:int, boundary_height:int,
         # scale height to maintain aspect ratio
         new_height = helper.round_to_closest((new_width * original_height) / original_width)
 
+    if multiple > 1 and not crop:
+        new_height = math.floor(new_height/multiple)*multiple
+        new_width  = math.floor(new_width/multiple)*multiple
+
     if resize_kernel == "didée":
         # https://forum.doom9.org/showthread.php?p=1748922#post1748922
         clip = vs.core.resize.Bicubic(clip=clip, height=new_height, width=new_width, filter_param_a=-1/2, filter_param_b=1/4)
-    else:
+    elif resize_kernel in ["Bicubic","Bilinear","Lanczos","Point","Spline16","Spline36","Spline64"]:
         resize_func = getattr(vs.core.resize, resize_kernel)
         clip = resize_func(clip=clip, height=new_height, width=new_width)
+    else:
+        raise vs.Error(f"No such kernel: '{resize_kernel}'")
 
-    # Make divisible by 2 for vp9 :)
-    if multiple > 1:
+    if multiple > 1 and crop:
         new_height_div = math.floor(new_height/multiple)*multiple
         new_width_div  = math.floor(new_width/multiple)*multiple
-        if crop:
-            if new_height_div != new_height or new_width_div != new_width:
-                clip = vs.core.std.CropAbs(clip=clip, height=new_height_div,
-                                                        width=new_width_div)
+        if new_height_div != new_height or new_width_div != new_width:
+            clip = vs.core.std.CropAbs(clip=clip, height=new_height_div,
+                                                    width=new_width_div)
     return clip
 
 def down_to_444(clip:vs.VideoNode, width:Optional[int]=None, height:Optional[int]=None,
@@ -1013,9 +1082,9 @@ def bt2390_ictcp(clip:vs.VideoNode, source_peak:Optional[int]=None,
     clip = vs.core.resize.Spline36(clip=clip, format=vs.YUV444P16, matrix_s="709", filter_param_a=0, filter_param_b=0.75, range_in_s="full", range_s="limited", chromaloc_in_s="center", chromaloc_s="center", dither_type="none")
     return clip
 
-def imwri_src(dir:str, fpsnum:int, fpsden:int, firstnum:int=0, alpha:bool=False) -> vs.VideoNode:
+def imwri_src(dir:str, fpsnum:int, fpsden:int, firstnum:int=0, alpha:bool=False, ext:str=".png") -> vs.VideoNode:
 
-    srcs = [dir + src for src in os.listdir(dir)]
+    srcs = [dir + src for src in os.listdir(dir) if src.endswith(ext)]
     clip = vs.core.imwri.Read(srcs, firstnum=firstnum, alpha=alpha)
     clip = vs.core.std.AssumeFPS(clip=clip, fpsnum=fpsnum, fpsden=fpsden)
     return clip
