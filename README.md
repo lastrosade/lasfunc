@@ -71,27 +71,47 @@ output.rav1e(clip:vs.VideoNode, file_str:str, speed:int=6, scd_speed:int=1,
 imwri_src(dir:str, fpsnum:int, fpsden:int, firstnum:int=0, alpha:bool=False) -> vs.VideoNode
 ```
 
-### Should be part of python
-
-```python
-round_to_closest(n:Union[int,float]) -> int
-```
-
 ### Pad video to fit in box
 
 ```python
-boundary_pad(clip:vs.VideoNode, boundary_width:int, boundary_height:int) -> vs.VideoNode
+boundary_pad(clip:vs.VideoNode, boundary_width:int, boundary_height:int, x:int=50, y:int=50) -> vs.VideoNode
 ```
 
-### Resize video to fit in box
+### Resize functions
 
 ```python
-boundary_resize(clip:vs.VideoNode, boundary_width:int, boundary_height:int, 
-    multiple:int=1, crop:bool=False, 
-    resize_kernel:str="Spline36") -> vs.VideoNode
+resize(clip:vs.VideoNode, width:Optional[int]=None,
+    height:Optional[int]=None, scale:Optional[Union[int, float]]=None,
+    kernel:str="didée", taps:Optional[int]=None) -> vs.VideoNode
 ```
 
-### adaptive_noise
+```python
+ssim_downsample(clip:vs.VideoNode, width:int, height:int, smooth:Union[int,float]=1,
+        kernel:str="didée", gamma:bool=False, curve=vs.TransferCharacteristics.TRANSFER_BT709,
+        sigmoid:bool=False, epsilon:float=0.000001) -> vs.VideoNode
+```
+
+```python
+boundary_resize(clip:vs.VideoNode, width:Optional[int]=None,
+    height:Optional[int]=None, scale:Optional[Union[int, float]]=None,
+    multiple:int=2, crop:bool=False, kernel:str="didée",
+    taps:Optional[int]=None, ssim:bool=False, ssim_kwargs:dict={}) -> vs.VideoNode
+```
+
+```python
+down_to_444(clip:vs.VideoNode, width:Optional[int]=None, height:Optional[int]=None,
+    resize_kernel_y="spline36", resize_kernel_uv="spline16") -> vs.VideoNode
+```
+
+```python
+nnedi3_rpow2(clip:vs.VideoNode, rfactor:int=2, correct_shift:bool=True,
+    width:Optional[int]=None, height:Optional[int]=None,
+    kernel:str="didée", nsize:int=0, nns:int=2, qual:int=2, etype:int=0, 
+    pscrn:Optional[int]=None, opt:bool=True, 
+    int16_prescreener:bool=True, int16_predictor:bool=True, exp:int=0) -> vs.VideoNode
+```
+
+### Adaptive Noise
 
 ```python
 adaptive_noise(clip:vs.VideoNode, strength:float=0.25, static:bool=True,
@@ -154,6 +174,15 @@ HQDeringmod(clip:vs.VideoNode, p:Optional[vs.VideoNode]=None,
     ringmask:Optional[vs.VideoNode]=None, mrad:int=1, msmooth:int=1,
     incedge:bool=False, mthr:int=60, minp:int=1, nrmode:Optional[int]=None,
     sharp:int=1, drrep:int=24, thr:float=12.0, elast:float=2.0,
-    darkthr:Optional[float]=None, planes:List[int]=[0], show:bool=False) -> vs.VideoNode:
+    darkthr:Optional[float]=None, planes:List[int]=[0], show:bool=False) -> vs.VideoNode
 # original script by mawen1250
+```
+
+### Smart Sharpening
+
+```python
+fine_sharp(clip:vs.VideoNode, mode:int=1, 
+    sstr:float=2.5, cstr:Optional[float]=None, xstr:float=0, lstr:float=1.5,
+    pstr:float=1.28, ldmp:Optional[float]=None, hdmp:float=0.01, rep:int=12) -> vs.VideoNode
+    original script by Didée
 ```

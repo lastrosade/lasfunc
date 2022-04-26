@@ -1,8 +1,12 @@
 import vapoursynth as vs
-import math, os, subprocess
-from typing import Optional, Union, List
+import math
+import os
+import subprocess
+from functools import partial
+from typing import Optional, Union, List, NamedTuple, Literal
 
-# Requriements: imwri, mvtools, fmtc, rgvs, flux, ctmf, vs-noise, adaptivegrain
+# Requriements: imwri, mvtools, fmtc, rgvs, rgsf, flux,
+#               ctmf, vs-noise, adaptivegrain, znedi3
 
 # Docs
 # https://github.com/vapoursynth/vs-imwri/blob/master/docs/imwri.rst
@@ -15,13 +19,15 @@ from typing import Optional, Union, List
 # https://github.com/wwww-wwww/vs-noise
 # https://git.kageru.moe/kageru/adaptivegrain
 
+
 class helper:
-    def round_to_closest(n:Union[int, float]) -> int:
+
+    def round_to_closest(x:Union[int, float]) -> int:
         # I'm amazed that's not a thing.
 
-        if n - math.floor(n) < 0.5:
-            return math.floor(n)
-        return math.ceil(n)
+        if x - math.floor(x) < 0.5:
+            return math.floor(x)
+        return math.ceil(x)
 
     def scale_depth(i:int, depth_out:int=16, depth_in:int=8) -> int:
         # converting the values in one depth to another
@@ -33,6 +39,50 @@ class helper:
         return helper.round_to_closest(value * peak / 255) if peak != 1 else value / 255
 
 class util:
+
+    def fmtc_kernel_kwargs(kernel:str, taps:Optional[int]=None):
+
+        kernel = kernel.lower()
+        if kernel in ["point", "nearest", "neighbour"]:
+            kernel_kwargs = {"kernel": "point"}
+        # most of those are from lvsfunc
+        elif kernel in ["rect", "box", "linear", "bilinear", "blackman", 
+                        "blackmanminlobe", "spline", "sinc", "spline16",
+                        "spline36", "spline64"]:
+            kernel_kwargs = {"kernel": kernel}
+        elif kernel == "lanczos":
+            taps = 3 if taps is None else taps
+            kernel_kwargs = {"kernel": "lanczos", "taps": taps}
+        elif kernel == "spline144":
+            kernel_kwargs = {"kernel": "spline", "taps": 6}
+        # Bicubics
+        elif kernel == "didée":
+            kernel_kwargs = {"kernel": "bicubic", "a1": -1/2, "a2": 1/4}
+        elif kernel in ["mitchell", "mitchell-netravali"]:
+            kernel_kwargs = {"kernel": "bicubic", "a1": 1/3, "a2": 1/3}
+        elif kernel in ["catrom", "catmullrom", "catmull-rom"]:
+            kernel_kwargs = {"kernel": "bicubic", "a1": 0, "a2": 1/2}
+        elif kernel == "bicubicsharp":
+            kernel_kwargs = {"kernel": "bicubic", "a1": 0, "a2": 1}
+        elif kernel == "robidouxsoft":
+            x = (9 - 3 * math.sqrt(2)) / 7
+            kernel_kwargs = {"kernel": "bicubic",
+                            "a1": x, 
+                            "a2": (1 - x) / 2}
+        elif kernel == "robidoux":
+            kernel_kwargs = {"kernel": "bicubic",   
+                            "a1": 12 / (19 + 9 * math.sqrt(2)), 
+                            "a2": 113 / (58 + 216 * math.sqrt(2))}
+        elif kernel == "robidouxsharp":
+            kernel_kwargs = {"kernel": "bicubic",   
+                            "a1": 6 / (13 + 7 * math.sqrt(2)),
+                            "a2": 7 / (2 + 12 * math.sqrt(2))}
+        elif kernel == "bspline":
+            kernel_kwargs = {"kernel": "bicubic", "a1": 1, "a2": 0}
+        else:
+            raise vs.Error("fmtc_kernel_kwargs: unkown kernel")
+        return kernel_kwargs
+
     # stolen from vsutil btw.
 
     def plane(clip:vs.VideoNode, planeno:int) -> vs.VideoNode:
@@ -238,7 +288,7 @@ class util:
 
             sSType = sFormat.sample_type
             sbitPS = sFormat.bits_per_sample
-            
+
             if sSType == vs.INTEGER:
                 neutral = 1 << (sbitPS - 1)
                 value_range = (1 << sbitPS) - 1
@@ -269,7 +319,7 @@ class util:
                     dif_abs = abs(dif)
                     thr_1 = largen_thr if dif > 0 else thr
                     thr_2 = thr_1 * elast
-                    
+
                     if dif_abs <= thr_1:
                         return neutral
                     elif dif_abs >= thr_2:
@@ -450,7 +500,7 @@ class output:
         if clip.format.name not in ['YUV420P8', 'YUV422P8', 'YUV444P8', 'YUV420P10', 'YUV422P10', 'YUV444P10', 'YUV420P12', 'YUV422P12', 'YUV444P12']:
             raise vs.Error(f"Pixel format must be one of `YUV420P8, YUV422P8, YUV444P8, YUV420P10, YUV422P10, YUV444P10, YUV420P12, YUV422P12, YUV444P12`  currently {clip.format.name}")
 
-        if gop is None: gop = min(300, round(clip.fps.numerator/clip.fps.denominator)*10)
+        if gop is None: gop = min(300, helper.round_to_closest(clip.fps)*10)
 
         args = [
             executable,
@@ -478,6 +528,37 @@ class output:
             clip.output(process.stdin, y4m=True)
             process.stdin.close()
         file.close()
+
+    # def svtav1(clip:vs.VideoNode, file_str:str,
+
+
+    #     stat_file:Optional[str]=None):
+
+    #     if clip.format.name not in ['YUV420P8', 'YUV420P10']:
+    #         raise vs.Error(f"Pixel format must be one of `YUV420P8, YUV420P10` currently {clip.format.name}")
+
+    #     args = [
+    #         executable,
+    #         "-i", "-",
+    #         "-b", "stdout",
+    #         "--fps-num", f"{clip.fps.numerator}",
+    #         "--fps-denom", f"{clip.fps.denominator}",
+    #         "--width", f"{clip.width}",
+    #         "--height", f"{clip.height}",
+    #         "--input-depth", f"{clip.format.bits_per_sample}"
+    #     ]
+
+    #     if stat_file is not None: args += [
+    #         "--stat-file", f"{stat_file}",
+    #         "--enable-stat-report", "1"
+    #     ]
+
+    #     print(" ".join(args))
+    #     file = open(file_str, 'wb')
+    #     with subprocess.Popen(args, stdin=subprocess.PIPE, stdout=file) as process:
+    #         clip.output(process.stdin)
+    #         process.stdin.close()
+    #     file.close()
 
     def aomenc_fp(clip:vs.VideoNode, fpf=str, speed:int=6, executable:str="aomenc"):
 
@@ -511,7 +592,7 @@ class output:
 
         print(" ".join(args))
         with subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE) as process:
-            clip.output(process.stdin, y4m=True)
+            clip.output(process.stdin)
             process.stdin.close()
 
     def aomenc(clip:vs.VideoNode, file_str:str, mux:str="webm", speed:int=4, 
@@ -540,7 +621,7 @@ class output:
         if (mux not in ["ivf", "webm", "obu"]):
             raise vs.Error('Muxing container format must be one of `ivf webm obu`')
 
-        if gop is None: gop = min(300, round(clip.fps.numerator/clip.fps.denominator)*10)
+        if gop is None: gop = min(300, helper.round_to_closest(clip.fps)*10)
         if lif is None: lif = min(35, gop)
         if tiles_row is None: tiles_row = math.floor(clip.height/1080) if clip.height<clip.width else math.floor(clip.height/1920)
         if tiles_col is None: tiles_col = math.floor(clip.width/1920) if clip.height<clip.width else math.floor(clip.width/1080)
@@ -607,7 +688,7 @@ class output:
             f"--arnr-strength={arnr_strength}",
             f"--arnr-maxframes={arnr_max_frames}",
         ]
-        
+
         # if (clip.height*clip.width < 1280*720):
         #     args += ["--max-partition-size=64", "--sb-size=64"] # sb-size used to be 32 but now it can't work? `dynamic, 64, 128`
         if (clip.height*clip.width < 1920*1080):
@@ -788,7 +869,7 @@ class output:
                     util.plane(clip, 0)  # r
                 ], vs.RGB)
 
-        if gop is None: gop = min(300, round(clip.fps.numerator/clip.fps.denominator)*10)
+        if gop is None: gop = min(300, helper.round_to_closest(clip.fps)*10)
         if lif is None: lif = min(35, gop)
         tiles_row = math.floor(clip.height/1080) if clip.height<clip.width else math.floor(clip.height/1920)
         tiles_col = math.floor(clip.width/1920) if clip.height<clip.width else math.floor(clip.width/1080)
@@ -844,7 +925,7 @@ class output:
         if clip.format.name not in ['YUV420P8', 'YUV420P10']:
             raise vs.Error(f"Pixel format must be one of `YUV420P8, YUV420P10` currently {clip.format.name}")
 
-        if gop is None: gop = min(300, round(clip.fps.numerator/clip.fps.denominator)*10)
+        if gop is None: gop = min(300, helper.round_to_closest(clip.fps)*10)
         if lad is None: lad = min(120, gop)
         if tiles_row is None: tiles_row = math.floor(clip.height/1080)
         if tiles_col is None: tiles_col = math.floor(clip.width/1920)
@@ -886,44 +967,179 @@ def boundary_pad(clip:vs.VideoNode, boundary_width:int, boundary_height:int, x:i
             left   = (boundary_width-clip.width)  *(x/100),
             right  = (boundary_width-clip.width)  *(1-(x/100)),
             top    = (boundary_height-clip.height)*(y/100),
-            bottom = (boundary_height-clip.height)*(1-(y/100))
-            )
+            bottom = (boundary_height-clip.height)*(1-(y/100)))
     return clip
 
-def boundary_resize(clip:vs.VideoNode, boundary_width:int, boundary_height:int, 
-    multiple:int=1, crop:bool=False, 
-    resize_kernel:str="didée") -> vs.VideoNode:
+def resize(clip:vs.VideoNode, width:Optional[int]=None,
+    height:Optional[int]=None, scale:Optional[Union[int, float]]=None,
+    kernel:str="didée", taps:Optional[int]=None) -> vs.VideoNode:
 
-    # Determine rescaling values
-    new_height = original_height = clip.height
-    new_width  = original_width  = clip.width
+    if hasattr(vs.core, 'fmtc') is not True:
+        raise RuntimeError("resize: fmtconv plugin is required")
 
-    # first check if we need to scale the height
-    if new_height > boundary_height:
-        # scale height to fit instead
-        new_height = boundary_height
-        # scale width to maintain aspect ratio
-        new_width = helper.round_to_closest((new_height * original_width) / original_height)
-
-    # then check if we need to scale even with the new height
-    if new_width > boundary_width:
-        # scale width to fit
-        new_width = boundary_width
-        # scale height to maintain aspect ratio
-        new_height = helper.round_to_closest((new_width * original_height) / original_width)
-
-    if multiple > 1 and not crop:
-        new_height = math.floor(new_height/multiple)*multiple
-        new_width  = math.floor(new_width/multiple)*multiple
-
-    if resize_kernel == "didée":
-        # https://forum.doom9.org/showthread.php?p=1748922#post1748922
-        clip = vs.core.resize.Bicubic(clip=clip, height=new_height, width=new_width, filter_param_a=-1/2, filter_param_b=1/4)
-    elif resize_kernel in ["Bicubic","Bilinear","Lanczos","Point","Spline16","Spline36","Spline64"]:
-        resize_func = getattr(vs.core.resize, resize_kernel)
-        clip = resize_func(clip=clip, height=new_height, width=new_width)
+    if scale is not None:
+        scale_kwargs = {"scale": scale}
+    elif width is not None and height is not None:
+        scale_kwargs = {"w": width, "h": height}
     else:
-        raise vs.Error(f"No such kernel: '{resize_kernel}'")
+        raise vs.Error("resize: Must specify scale or height and scale")
+
+    kernel_kwargs = util.fmtc_kernel_kwargs(kernel, taps)
+
+    clip = vs.core.fmtc.resample(clip, **scale_kwargs, **kernel_kwargs)
+    return clip
+
+def ssim_downsample(clip:vs.VideoNode, width:int, height:int, smooth:Union[int,float]=1,
+        kernel:str="didée", gamma:bool=False, curve=vs.TransferCharacteristics.TRANSFER_BT709,
+        sigmoid:bool=False, epsilon:float=0.000001) -> vs.VideoNode:
+
+    # TODO: Clean
+    # from https://gist.github.com/Ichunjo/16ab1f893588aafcb096c1f35a0cfb15
+
+    CURVES = Literal [
+        vs.TransferCharacteristics.TRANSFER_IEC_61966_2_1,
+        vs.TransferCharacteristics.TRANSFER_BT709,
+        vs.TransferCharacteristics.TRANSFER_BT601,
+        vs.TransferCharacteristics.TRANSFER_ST240_M,
+        vs.TransferCharacteristics.TRANSFER_BT2020_10,
+        vs.TransferCharacteristics.TRANSFER_BT2020_12,
+    ]
+
+    class Coefs(NamedTuple):
+        k0: float
+        phi: float
+        alpha: float
+        gamma: float
+
+    def get_coefs(curve: vs.TransferCharacteristics) -> Coefs:
+
+        srgb = Coefs(0.04045, 12.92, 0.055, 2.4)
+        bt709 = Coefs(0.08145, 4.5, 0.0993, 2.22222)
+        smpte240m = Coefs(0.0912, 4.0, 0.1115, 2.22222)
+        bt2020 = Coefs(0.08145, 4.5, 0.0993, 2.22222)
+
+        gamma_linear_map = {
+            vs.TransferCharacteristics.TRANSFER_IEC_61966_2_1: srgb,
+            vs.TransferCharacteristics.TRANSFER_BT709: bt709,
+            vs.TransferCharacteristics.TRANSFER_BT601: bt709,
+            vs.TransferCharacteristics.TRANSFER_ST240_M: smpte240m,
+            vs.TransferCharacteristics.TRANSFER_BT2020_10: bt2020,
+            vs.TransferCharacteristics.TRANSFER_BT2020_12: bt2020
+        }
+
+        return gamma_linear_map[curve]
+
+    def gamma2linear(clip: vs.VideoNode, curve:CURVES, gcor:float=1.0,
+        sigmoid:bool=False, thr:float=0.5, cont:float=6.5,
+        epsilon:float=1e-6) -> vs.VideoNode:
+
+        assert clip.format
+        if get_depth(clip) != 32 and clip.format.sample_type != vs.FLOAT:
+            raise ValueError('Only 32 bits float is allowed')
+
+        c = get_coefs(curve)
+
+        expr = f'x {c.k0} <= x {c.phi} / x {c.alpha} + 1 {c.alpha} + / {c.gamma} pow ? {gcor} pow'
+        if sigmoid:
+            x0 = f'1 1 {cont} {thr} * exp + /'
+            x1 = f'1 1 {cont} {thr} 1 - * exp + /'
+            expr = f'{thr} 1 {expr} {x1} {x0} - * {x0} + {epsilon} max / 1 - {epsilon} max log {cont} / -'
+
+        expr = f'{expr} 0.0 max 1.0 min'
+
+        return vs.core.std.Expr(clip, expr).std.SetFrameProps(_Transfer=8)
+
+    def linear2gamma(clip:vs.VideoNode, curve:CURVES, gcor:float=1.0,
+        sigmoid:bool=False, thr:float=0.5, cont:float=6.5) -> vs.VideoNode:
+
+        assert clip.format
+        if get_depth(clip) != 32 and clip.format.sample_type != vs.FLOAT:
+            raise ValueError('Only 32 bits float is allowed')
+
+        c = get_coefs(curve)
+
+        expr = 'x'
+        if sigmoid:
+            x0 = f'1 1 {cont} {thr} * exp + /'
+            x1 = f'1 1 {cont} {thr} 1 - * exp + /'
+            expr = f'1 1 {cont} {thr} {expr} - * exp + / {x0} - {x1} {x0} - /'
+
+        expr += f' {gcor} pow'
+        expr = f'{expr} {c.k0} {c.phi} / <= {expr} {c.phi} * {expr} 1 {c.gamma} / pow {c.alpha} 1 + * {c.alpha} - ?'
+        expr = f'{expr} 0.0 max 1.0 min'
+
+        return vs.core.std.Expr(clip, expr).std.SetFrameProps(_Transfer=curve)
+
+    if hasattr(vs.core, 'fmtc') is not True:
+        raise RuntimeError("resize: fmtconv plugin is required")
+
+    if clip.format.bits_per_sample != 32 and clip.format.sample_type != vs.FLOAT:
+        raise ValueError('ssim_downsample: only 32 bits float is allowed')
+
+    if isinstance(smooth, int):
+        filter_func = partial(vs.core.std.BoxBlur, hradius=smooth, vradius=smooth)
+    elif isinstance(smooth, float):
+        filter_func = partial(vs.core.tcanny.TCanny, sigma=smooth, mode=-1)
+    else:
+        vs.Error("ssim_downsample: smooth must be an int or float")
+
+    if gamma:
+        clip = gamma2linear(clip, curve, sigmoid=sigmoid, epsilon=epsilon)
+
+    l = resize(clip=clip, width=width, height=height, kernel=kernel)
+    l2 = resize(clip=clip.std.Expr('x dup *'), width=width, height=height, kernel=kernel)
+
+    m = filter_func(l)
+
+    sl_plus_m_square = filter_func(l.std.Expr('x dup *'))
+    sh_plus_m_square = filter_func(l2)
+    m_square = m.std.Expr('x dup *')
+    r = vs.core.std.Expr([sl_plus_m_square, sh_plus_m_square, m_square], f'x z - {epsilon} < 0 y z - x z - / sqrt ?')
+    t = filter_func(vs.core.std.Expr([r, m], 'x y *'))
+    m = filter_func(m)
+    r = filter_func(r)
+    d = vs.core.std.Expr([m, r, l, t], 'x y z * + a -')
+
+    if gamma:
+        d = linear2gamma(d, curve, sigmoid=sigmoid)
+
+    return d
+
+def boundary_resize(clip:vs.VideoNode, width:Optional[int]=None,
+    height:Optional[int]=None, scale:Optional[Union[int, float]]=None,
+    multiple:int=2, crop:bool=False, kernel:str="didée",
+    taps:Optional[int]=None, ssim:bool=False, ssim_kwargs:dict={}) -> vs.VideoNode:
+
+    if scale is not None:
+        clip = resize(clip, scale=scale)
+    else:
+        new_height = original_height = clip.height
+        new_width  = original_width  = clip.width
+        if width is not None and height is not None:
+            if new_height > height:
+                new_height = height
+                new_width = helper.round_to_closest((new_height * original_width) / original_height)
+            if new_width > width:
+                new_width = width
+                new_height = helper.round_to_closest((new_width * original_height) / original_width)
+        elif width is not None:
+            new_width = width
+            new_height = helper.round_to_closest((new_width * original_height) / original_width)
+        elif height is not None:
+            new_height = height
+            new_width = helper.round_to_closest((new_height * original_width) / original_height)
+        else:
+            raise vs.Error("boundary_resize: Must specify width, height or scale")
+
+        if multiple > 1 and not crop:
+            new_width  = math.floor(new_width/multiple)*multiple
+            new_height = math.floor(new_height/multiple)*multiple
+        scale_kwargs = {"w": new_width, "h": new_height}
+
+    if ssim:
+        clip = ssim_downsample(clip, height=new_height, width=new_width, kernel=kernel, **ssim_kwargs)
+    else:
+        clip = resize(clip, height=new_height, width=new_width, kernel=kernel)
 
     if multiple > 1 and crop:
         new_height_div = math.floor(new_height/multiple)*multiple
@@ -931,10 +1147,11 @@ def boundary_resize(clip:vs.VideoNode, boundary_width:int, boundary_height:int,
         if new_height_div != new_height or new_width_div != new_width:
             clip = vs.core.std.CropAbs(clip=clip, height=new_height_div,
                                                     width=new_width_div)
+
     return clip
 
 def down_to_444(clip:vs.VideoNode, width:Optional[int]=None, height:Optional[int]=None,
-    resize_kernel_y="Spline36", resize_kernel_uv="Spline16") -> vs.VideoNode:
+    resize_kernel_y="spline36", resize_kernel_uv="spline16") -> vs.VideoNode:
     # 4k 420 -> 1080p 444
 
     if source.format.color_family != vs.YUV:
@@ -943,17 +1160,14 @@ def down_to_444(clip:vs.VideoNode, width:Optional[int]=None, height:Optional[int
     if width is None: width = clip.width/2
     if height is None: height = clip.height/2
 
-    resize_func_y  = getattr(vs.core.resize, resize_kernel_y)
-    resize_func_uv = getattr(vs.core.resize, resize_kernel_uv)
-
     y = vs.core.std.ShufflePlanes(clip, planes=0, colorfamily=vs.GRAY)
-    y = resize_func_y(clip=y, height=height, width=width)
+    y = resize(clip=y, height=height, width=width, kernel=resize_kernel_y)
 
     u = vs.core.std.ShufflePlanes(clip, planes=1, colorfamily=vs.GRAY)
-    u = resize_func_uv(clip=u, height=height, width=width)
+    u = resize(clip=u, height=height, width=width, kernel=resize_kernel_uv)
     
     v = vs.core.std.ShufflePlanes(clip, planes=2, colorfamily=vs.GRAY)
-    v = resize_func_uv(clip=v, height=height, width=width)
+    v = resize(clip=v, height=height, width=width, kernel=resize_kernel_uv)
 
     clip = vs.core.std.ShufflePlanes(clips=[y,u,v], planes=[0,0,0], colorfamily=vs.YUV)
     return clip
@@ -1129,7 +1343,7 @@ def mv_scene_detection(clip:vs.VideoNode, preset:str='fast', super_pel:int=2,
     if overlapv is None: overlapv = overlap
     if search is None: search = [0,5,3][preset_number]
 
-    analyse_params = {
+    analyse_kwargs = {
         'overlap' : overlap,
         'overlapv':overlapv,
         'search' : search,
@@ -1148,7 +1362,7 @@ def mv_scene_detection(clip:vs.VideoNode, preset:str='fast', super_pel:int=2,
     _fun_scdetection = vs.core.mvsf.SCDetection if clip.format.sample_type == vs.FLOAT else vs.core.mv.SCDetection
 
     mvsuper = _fun_super(clip, pel=super_pel, sharp=2, rfilter=4)
-    vectors = _fun_analyse(mvsuper, isb=True, **analyse_params)
+    vectors = _fun_analyse(mvsuper, isb=True, **analyse_kwargs)
 
     clip = _fun_scdetection(clip, vectors=vectors, thscd1=thscd1, thscd2=int(thscd2*255/100))
     return clip
@@ -1178,7 +1392,7 @@ def mv_motion_interpolation(clip:vs.VideoNode, fpsnum:int=60, fpsden:int=1, pres
     if block_mode is None: block_mode = [0,0,3][preset_number]
     if flow_mask is None: flow_mask = [0,0,2][preset_number]
 
-    analyse_params = {
+    analyse_kwargs = {
         'overlap' : overlap,
         'overlapv':overlapv,
         'search' : search,
@@ -1193,7 +1407,7 @@ def mv_motion_interpolation(clip:vs.VideoNode, fpsnum:int=60, fpsden:int=1, pres
     }
 
     #block or flow Params 
-    block_or_flow_params = {
+    block_or_flow_kwargs = {
         'thscd1':thscd1,
         'thscd2':int(thscd2*255/100),
         'blend':blend,
@@ -1208,16 +1422,16 @@ def mv_motion_interpolation(clip:vs.VideoNode, fpsnum:int=60, fpsden:int=1, pres
     _fun_flowfps     = vs.core.mvsf.FlowFPS     if clip.format.sample_type == vs.FLOAT else vs.core.mv.FlowFPS
 
     mvsuper = _fun_super(clip, pel=super_pel, sharp=2, rfilter=4)
-    block_vectors = _fun_analyse(mvsuper, isb=True, **analyse_params)
-    flow_vectors = _fun_analyse(mvsuper, isb=False, **analyse_params)
+    block_vectors = _fun_analyse(mvsuper, isb=True, **analyse_kwargs)
+    flow_vectors = _fun_analyse(mvsuper, isb=False, **analyse_kwargs)
 
     if clip.fps.numerator/clip.fps.denominator > fpsnum/fpsden:
         clip = _fun_flowblur(clip, mvsuper, block_vectors, flow_vectors, blur=Mblur)
 
     if block == True:
-        out = _fun_blockfps(clip, mvsuper, block_vectors, flow_vectors, **block_or_flow_params, mode=block_mode)
+        out = _fun_blockfps(clip, mvsuper, block_vectors, flow_vectors, **block_or_flow_kwargs, mode=block_mode)
     else:
-        out = _fun_flowfps(clip, mvsuper, block_vectors, flow_vectors, **block_or_flow_params, mask=flow_mask)
+        out = _fun_flowfps(clip, mvsuper, block_vectors, flow_vectors, **block_or_flow_kwargs, mask=flow_mask)
     return out
 
 def adaptive_noise(clip:vs.VideoNode, strength:float=0.25, static:bool=True,
@@ -1234,7 +1448,7 @@ def adaptive_noise(clip:vs.VideoNode, strength:float=0.25, static:bool=True,
     return vs.core.std.MaskedMerge(clip, grained, mask)
 
 def mv_flux_smooth(clip:vs.VideoNode, temporal_threshold:int=12, 
-    super_params:dict={}, analyse_params:dict={}, compensate_params:dict={},
+    super_kwargs:dict={}, analyse_kwargs:dict={}, compensate_kwargs:dict={},
     planes=[0,1,2]) -> vs.VideoNode:
     # port from https://forum.doom9.org/showthread.php?s=d58237a359f5b1f2ea45591cceea5133&p=1572664#post1572664
     # allow setting parameters for mvtools
@@ -1250,20 +1464,20 @@ def mv_flux_smooth(clip:vs.VideoNode, temporal_threshold:int=12,
     # _fun_degrain2    = vs.core.mvsf.Degrain2    if clip.format.sample_type == vs.FLOAT else vs.core.mv.Degrain2
     # _fun_degrain3    = vs.core.mvsf.Degrain3    if clip.format.sample_type == vs.FLOAT else vs.core.mv.Degrain3
 
-    super_params = {"pel":2, "sharp":1, **super_params}
-    analyse_params = {"truemotion":False, "delta":1, "blksize":16, "overlap":8, **analyse_params}
-    mvsuper = _fun_super(clip, **super_params)
-    mvanalyset = _fun_analyse(mvsuper, isb=True, **analyse_params)
-    mvanalysef = _fun_analyse(mvsuper, isb=False, **analyse_params)
-    mvcompensavet = _fun_compensate(clip, mvsuper, mvanalyset, **compensate_params)
-    mvcompensavef = _fun_compensate(clip, mvsuper, mvanalysef, **compensate_params)
+    super_kwargs = {"pel":2, "sharp":1, **super_kwargs}
+    analyse_kwargs = {"truemotion":False, "delta":1, "blksize":16, "overlap":8, **analyse_kwargs}
+    mvsuper = _fun_super(clip, **super_kwargs)
+    mvanalyset = _fun_analyse(mvsuper, isb=True, **analyse_kwargs)
+    mvanalysef = _fun_analyse(mvsuper, isb=False, **analyse_kwargs)
+    mvcompensavet = _fun_compensate(clip, mvsuper, mvanalyset, **compensate_kwargs)
+    mvcompensavef = _fun_compensate(clip, mvsuper, mvanalysef, **compensate_kwargs)
     mvinterleave = vs.core.std.Interleave([mvcompensavef, clip, mvcompensavet])
     fluxsmooth = vs.core.flux.SmoothT(mvinterleave, temporal_threshold=temporal_threshold, planes=planes)
     return vs.core.std.SelectEvery(fluxsmooth, 3, 1)
 
 def STPressoMC(clip:vs.VideoNode, limit:int=3, bias:int=24, RGVS_mode:int=4,
     temporal_threshold:int=12, temporal_limit:int=3, temporal_bias:int=49, back:int=1,
-    super_params:dict={}, analyse_params:dict={}, compensate_params:dict={}) -> vs.VideoNode:
+    super_kwargs:dict={}, analyse_kwargs:dict={}, compensate_kwargs:dict={}) -> vs.VideoNode:
     # orginal script by Didée, taken from xvs
 
     # The goal of STPressoMC (Spatio-Temporal Pressdown using Motion Compensation) is
@@ -1319,7 +1533,7 @@ def STPressoMC(clip:vs.VideoNode, limit:int=3, bias:int=24, RGVS_mode:int=4,
         O = vs.core.std.Expr([C,B],expr)
         L.append(O)
     if temporal_threshold != 0:
-        st = mv_flux_smooth(clip_rgvs, temporal_threshold, super_params, analyse_params, compensate_params, [0,1,2])
+        st = mv_flux_smooth(clip_rgvs, temporal_threshold, super_kwargs, analyse_kwargs, compensate_kwargs, [0,1,2])
         diff = vs.core.std.MakeDiff(clip_rgvs, st, [0,1,2])
         last = vs.core.std.ShufflePlanes(L, [0,0,0], colorfamily=vs.YUV)
         diff2 = vs.core.std.MakeDiff(last,diff, [0,1,2])
@@ -1344,24 +1558,24 @@ def HQDeringmod(clip:vs.VideoNode, p:Optional[vs.VideoNode]=None,
     # Applies deringing by using a smart smoother near edges (where ringing occurs) only
 
     # Parameters:
-    #  mrad    - Expanding of edge mask, higher value means more aggressive processing. Default is 1
-    #  msmooth - Inflate of edge mask, smooth boundaries of mask. Default is 1
-    #  incedge - Whether to include edge in ring mask, by default ring mask only include area near edges. Default is false
-    #  mthr    - Threshold of sobel edge mask, lower value means more aggressive processing. Or define your own mask clip "ringmask". Default is 60
+    #  mrad (int): Expanding of edge mask, higher value means more aggressive processing. Default is 1
+    #  msmooth (int): Inflate of edge mask, smooth boundaries of mask. Default is 1
+    #  incedge (bool): Whether to include edge in ring mask, by default ring mask only include area near edges. Default is false
+    #  mthr (int): Threshold of sobel edge mask, lower value means more aggressive processing. Or define your own mask clip "ringmask". Default is 60
     #            But for strong ringing, lower value will treat some ringing as edge, which protects this ringing from being processed.
-    #  minp    - Inpanding of sobel edge mask, higher value means more aggressive processing. Default is 1
-    #  nrmode  - Kernel of dering - 1: min_blur(radius=1), 2: min_blur(radius=2), 3: min_blur(radius=3). Or define your own smoothed clip "p". Default is 2 for HD / 1 for SD
-    #  sharp   - Whether to use contra-sharpening to resharp deringed clip, 1-3 represents radius, 0 means no sharpening. Default is 1
-    #  drrep   - Use repair for details retention, recommended values are 24/23/13/12/1. Default is 24
-    #  thr     - The same meaning with "thr" in Dither_limit_dif16, valid value range is [0.0, 128.0]. Default is 12.0
-    #  elast   - The same meaning with "elast" in Dither_limit_dif16, valid value range is [1.0, inf). Default is 2.0
+    #  minp (int): Inpanding of sobel edge mask, higher value means more aggressive processing. Default is 1
+    #  nrmode (int): Kernel of dering - 1: min_blur(radius=1), 2: min_blur(radius=2), 3: min_blur(radius=3). Or define your own smoothed clip "p". Default is 2 for HD / 1 for SD
+    #  sharp (int): Whether to use contra-sharpening to resharp deringed clip, 1-3 represents radius, 0 means no sharpening. Default is 1
+    #  drrep (int): Use repair for details retention, recommended values are 24/23/13/12/1. Default is 24
+    #  thr (float): The same meaning with "thr" in Dither_limit_dif16, valid value range is [0.0, 128.0]. Default is 12.0
+    #  elast (float): The same meaning with "elast" in Dither_limit_dif16, valid value range is [1.0, inf). Default is 2.0
     #            Larger "thr" will result in more pixels being taken from processed clip
     #            Larger "thr" will result in less pixels being taken from input clip
     #            Larger "elast" will result in more pixels being blended from processed&input clip, for smoother merging
-    #  darkthr - Threshold for darker area near edges, set it lower if you think deringing destroys too much lines, etc. Default is thr/4
+    #  darkthr (float): Threshold for darker area near edges, set it lower if you think deringing destroys too much lines, etc. Default is thr/4
     #            When "darkthr" is not equal to "thr", "thr" limits darkening while "darkthr" limits brightening
-    #  planes  - Whether to process the corresponding plane. The other planes will be passed through unchanged. Default is [0]
-    #  show    - Whether to output mask clip instead of filtered clip. Default is false
+    #  planes (list[int]): Whether to process the corresponding plane. The other planes will be passed through unchanged. Default is [0]
+    #  show (bool): Whether to output mask clip instead of filtered clip. Default is false
 
     if clip.format.color_family == vs.RGB:
         raise vs.Error('HQDeringmod: RGB format is not supported')
@@ -1454,3 +1668,221 @@ def HQDeringmod(clip:vs.VideoNode, p:Optional[vs.VideoNode]=None,
             return ringmask.std.Expr(expr=['', repr(neutral)])
     else:
         return vs.core.std.MaskedMerge(clip, limitclp, ringmask, planes=planes, first_plane=True)
+
+def nnedi3_rpow2(clip:vs.VideoNode, rfactor:int=2, correct_shift:bool=True,
+    width:Optional[int]=None, height:Optional[int]=None,
+    kernel:str="didée", nsize:int=0, nns:int=2, qual:int=2, etype:int=0, 
+    pscrn:Optional[int]=None, opt:bool=True, 
+    int16_prescreener:bool=True, int16_predictor:bool=True, exp:int=0):
+
+    # nnedi3_rpow2 is for enlarging images by powers of 2.
+
+    # Parameters:
+    #   rfactor (int): Image enlargement factor.
+    #       Must be a power of 2 in the range [2 to 1024].
+    #   correct_shift (bool): If False, the shift is not corrected.
+    #       The correction is accomplished by using the subpixel
+    #       cropping capability of fmtc's resizers.
+    #   width (int): If correcting the image center shift by using the
+    #       "correct_shift" parameter, width/height allow you to set a
+    #       new output resolution.
+    #   kernel (string): Sets the resizer used for correcting the image
+    #       center shift that nnedi3_rpow2 introduces.
+    #   nsize, nns, qual, etype, pscrn, opt, int16_prescreener,
+    #   int16_predictor, exp:
+    #       See https://github.com/sekrit-twc/znedi3
+
+    if width is None:
+        width = clip.width*rfactor
+    if height is None:
+        height = clip.height*rfactor
+    hshift = 0.0
+    vshift = -0.5
+
+    nnedi_kwargs = dict(dh=True, nsize=nsize, nns=nns, qual=qual, etype=etype,
+                    pscrn=pscrn, opt=opt, int16_prescreener=int16_prescreener,
+                    int16_predictor=int16_predictor, exp=exp)
+    chroma_kwargs = dict(sy=-0.5, planes=[2, 3, 3])
+    kernel_kwargs = util.fmtc_kernel_kwargs(kernel)
+
+    tmp = 1
+    times = 0
+    while tmp < rfactor:
+        tmp *= 2
+        times += 1
+
+    # Checks
+
+    if rfactor < 2 or rfactor > 1024:
+        raise ValueError("nnedi3_rpow2: rfactor must be between 2 and 1024")
+
+    if tmp != rfactor:
+        raise ValueError("nnedi3_rpow2: rfactor must be a power of 2")
+
+    if hasattr(vs.core, 'nnedi3') is not True:
+        raise RuntimeError("nnedi3_rpow2: nnedi3 plugin is required")
+
+    if correct_shift or clip.format.subsampling_h:
+        if hasattr(vs.core, 'fmtc') is not True:
+            raise RuntimeError("nnedi3_rpow2: fmtconv plugin is required")
+
+    last = clip
+
+    for i in range(times):
+        field = 1 if i == 0 else 0
+        last = vs.core.nnedi3.nnedi3(last, field=field, **nnedi_kwargs)
+        last = vs.core.std.Transpose(last)
+        if last.format.subsampling_w:
+            # Apparently always using field=1 for the horizontal pass somehow
+            # keeps luma/chroma alignment.
+            field = 1
+            hshift = hshift*2 - 0.5
+        else:
+            hshift = -0.5
+        last = vs.core.nnedi3.nnedi3(last, field=field, **nnedi_kwargs)
+        last = vs.core.std.Transpose(last)
+
+    # Correct vertical shift of the chroma.
+
+    if clip.format.subsampling_h:
+        last = vs.core.fmtc.resample(last, w=last.width, h=last.height, **chroma_kwargs, **kernel_kwargs)
+
+    if correct_shift is True:
+        last = vs.core.fmtc.resample(last, w=width, h=height, sx=hshift, sy=vshift, **kernel_kwargs)
+
+    if last.format.id != clip.format.id:
+        last = vs.core.fmtc.bitdepth(last, csp=clip.format.id)
+
+    return last
+
+def fine_sharp(clip:vs.VideoNode, mode:int=1, 
+    sstr:float=2.5, cstr:Optional[float]=None, xstr:float=0, lstr:float=1.5,
+    pstr:float=1.28, ldmp:Optional[float]=None, hdmp:float=0.01, rep:int=12):
+
+    # Original author: Didée (https://forum.doom9.org/showthread.php?t=166082)
+    # Small and relatively fast realtime-sharpening function, for 1080p,
+    # or after scaling 720p → 1080p during playback.
+    # (to make 720p look more like being 1080p)
+    # It's a generic sharpener. Only for good quality sources!
+    # (If the source is crap, FineSharp will happily sharpen the crap) :)
+    # Noise/grain will be enhanced, too. The method is GENERIC.
+
+    # Modus operandi: A basic nonlinear sharpening method is performed,
+    # then the *blurred* sharp-difference gets subtracted again.
+
+    # Args:
+    #     mode (int): 1 to 3, weakest to strongest. When negative -1 to -3,
+    #                    a broader kernel for equalisation is used.
+    #     sstr (float): strength of sharpening.
+    #     cstr (float): strength of equalisation (recommended 0.5 to 1.25)
+    #     xstr (float): strength of XSharpen-style final sharpening, 0.0 to 1.0.
+    #                    (but, better don't go beyond 0.25...)
+    #     lstr (float): modifier for non-linear sharpening.
+    #     pstr (float): exponent for non-linear sharpening.
+    #     ldmp (float): "low damp", to not over-enhance very small differences.
+    #                    (noise coming out of flat areas)
+    #     hdmp (float): "high damp", this damping term has a larger effect than ldmp
+    #                     when the sharp-difference is larger than 1, vice versa.
+    #     rep (int): repair mode used in final sharpening, recommended modes are 1/12/13.
+
+    def spline(x, coordinates):
+        def get_matrix(px:int, py:int, l:int):
+            matrix = []
+            matrix.append([(i == 0) * 1.0 for i in range(l + 1)])
+            for i in range(1, l - 1):
+                p = [0 for t in range(l + 1)]
+                p[i - 1] = px[i] - px[i - 1]
+                p[i] = 2 * (px[i + 1] - px[i - 1])
+                p[i + 1] = px[i + 1] - px[i]
+                p[l] = 6 * (((py[i + 1] - py[i]) / p[i + 1]) - (py[i] - py[i - 1]) / p[i - 1])
+                matrix.append(p)
+            matrix.append([(i == l - 1) * 1.0 for i in range(l + 1)])
+            return matrix
+        def equation(matrix, dim:int):
+            for i in range(dim):
+                num = matrix[i][i]
+                for j in range(dim + 1):
+                    matrix[i][j] /= num
+                for j in range(dim):
+                    if i != j:
+                        a = matrix[j][i]
+                        for k in range(i, dim + 1):
+                            matrix[j][k] -= a * matrix[i][k]
+        if not isinstance(coordinates, dict):
+            raise TypeError("coordinates must be a dict")
+        length = len(coordinates)
+        if length < 3:
+            raise ValueError("coordinates require at least three pairs")
+        px = [key for key in coordinates.keys()]
+        py = [val for val in coordinates.values()]
+        matrix = get_matrix(px, py, length)
+        equation(matrix, length)
+        for i in range(length + 1):
+            if x >= px[i] and x <= px[i + 1]:
+                break
+        j = i + 1
+        h = px[j] - px[i]
+        s = matrix[j][length] * (x - px[i]) ** 3
+        s -= matrix[i][length] * (x - px[j]) ** 3
+        s /= 6 * h
+        s += (py[j] / h - h * matrix[j][length] / 6) * (x - px[i])
+        s -= (py[i] / h - h * matrix[i][length] / 6) * (x - px[j])
+        
+        return s
+
+    color = clip.format.color_family
+    bd = clip.format.bits_per_sample
+    isFLOAT = clip.format.sample_type == vs.FLOAT
+    mid = 0 if isFLOAT else 1 << (bd - 1)
+    i = 0.00392 if isFLOAT else 1 << (bd - 8)
+    xy = 'x y - {} /'.format(i) if bd != 8 else 'x y -'
+    R = vs.core.rgsf.Repair if isFLOAT else vs.core.rgvs.Repair
+    mat1 = [1, 2, 1, 2, 4, 2, 1, 2, 1]
+    mat2 = [1, 1, 1, 1, 1, 1, 1, 1, 1]
+
+    if not isinstance(clip, vs.VideoNode):
+        raise TypeError("FineSharp: This is not a clip!")
+
+    if cstr is None:
+        cstr = spline(sstr, {0: 0, 0.5: 0.1, 1: 0.6, 2: 0.9, 2.5: 1, 3: 1.1, 3.5: 1.15, 4: 1.2, 8: 1.25, 255: 1.5})
+        cstr **= 0.8 if mode > 0 else cstr
+
+    if ldmp is None:
+        ldmp = sstr
+
+    sstr = max(sstr, 0)
+    cstr = max(cstr, 0)
+    xstr = min(max(xstr, 0), 1)
+    ldmp = max(ldmp, 0)
+    hdmp = max(hdmp, 0)
+
+    if sstr < 0.01 and cstr < 0.01 and xstr < 0.01:
+        return clip
+
+    tmp = vs.core.std.ShufflePlanes(clip, [0], vs.GRAY) if color in [vs.YUV] else clip
+
+    if abs(mode) == 1:
+        c2 = vs.core.std.Convolution(tmp, matrix=mat1).std.Median()
+    else:
+        c2 = vs.core.std.Median(tmp).std.Convolution(matrix=mat1)
+    if abs(mode) == 3:
+        c2 = c2.std.Median()
+    
+    if sstr >= 0.01:
+        expr = 'x y = x dup {} dup dup dup abs {} / {} pow swap3 abs {} + / swap dup * dup {} + / * * {} * + ?'
+        shrp = vs.core.std.Expr([tmp, c2], [expr.format(xy, lstr, 1/pstr, hdmp, ldmp, sstr*i)])
+
+        if cstr >= 0.01:
+            diff = vs.core.std.MakeDiff(shrp, tmp)
+            if cstr != 1:
+                expr = 'x {} *'.format(cstr) if isFLOAT else 'x {} - {} * {} +'.format(mid, cstr, mid)
+                diff = vs.core.std.Expr([diff], [expr])
+            diff = vs.core.std.Convolution(diff, matrix=mat1) if mode > 0 else vs.core.std.Convolution(diff, matrix=mat2)
+            shrp = vs.core.std.MakeDiff(shrp, diff)
+
+    if xstr >= 0.01:
+        xyshrp = vs.core.std.Expr([shrp, vs.core.std.Convolution(shrp, matrix=mat2)], ['x dup y - 9.69 * +'])
+        rpshrp = R(xyshrp, shrp, [rep])
+        shrp = vs.core.std.Merge(shrp, rpshrp, [xstr])
+
+    return vs.core.std.ShufflePlanes([shrp, clip], [0, 1, 2], color) if color in [vs.YUV] else shrp
