@@ -4,9 +4,11 @@ import os
 import subprocess
 from functools import partial
 from typing import Optional, Union, List, NamedTuple, Literal
+# https://peps.python.org/pep-0483/#fundamental-building-blocks
 
 # Requriements: imwri, mvtools, fmtc, rgvs, rgsf, flux,
-#               ctmf, vs-noise, adaptivegrain, znedi3
+#               ctmf, vs-noise, adaptivegrain, znedi3,
+#               tcanny, neo_f3kdb
 
 # Docs
 # https://github.com/vapoursynth/vs-imwri/blob/master/docs/imwri.rst
@@ -18,7 +20,10 @@ from typing import Optional, Union, List, NamedTuple, Literal
 # https://github.com/HomeOfVapourSynthEvolution/VapourSynth-CTMF
 # https://github.com/wwww-wwww/vs-noise
 # https://git.kageru.moe/kageru/adaptivegrain
-
+# https://github.com/sekrit-twc/znedi3
+# https://github.com/HomeOfVapourSynthEvolution/VapourSynth-TCanny
+# https://github.com/HomeOfAviSynthPlusEvolution/neo_f3kdb
+# https://f3kdb.readthedocs.io/en/stable/usage.html
 
 class helper:
 
@@ -34,9 +39,17 @@ class helper:
 
         return i*2**(depth_out-depth_in)
 
-    def scale255(value, peak):
+    def scale255(value:int, peak:int) -> int:
 
-        return helper.round_to_closest(value * peak / 255) if peak != 1 else value / 255
+        return helper.round_to_closest(peak * value/255)
+
+    def mod_m(x:Union[int, float], m:Union[int, float]=4.0) -> Union[int, float]:
+
+        return 16 if x < 16 else math.floor(x / m) * m
+
+    def clamp(minimum:Union[int, float], x:Union[int, float], maximum:Union[int, float]) -> int:
+
+        return helper.round_to_closest(max(minimum, min(x, maximum)))
 
 class util:
 
@@ -56,7 +69,7 @@ class util:
         elif kernel == "spline144":
             kernel_kwargs = {"kernel": "spline", "taps": 6}
         # Bicubics
-        elif kernel == "didée":
+        elif kernel in ["didée", "didee"]:
             kernel_kwargs = {"kernel": "bicubic", "a1": -1/2, "a2": 1/4}
         elif kernel in ["mitchell", "mitchell-netravali"]:
             kernel_kwargs = {"kernel": "bicubic", "a1": 1/3, "a2": 1/3}
@@ -85,11 +98,11 @@ class util:
 
     # stolen from vsutil btw.
 
-    def plane(clip:vs.VideoNode, planeno:int) -> vs.VideoNode:
+    def plane(clip:vs.VideoNode, plane:int) -> vs.VideoNode:
 
-        if clip.format.num_planes == 1 and planeno == 0:
+        if clip.format.num_planes == 1 and plane == 0:
             return clip
-        return vs.core.std.ShufflePlanes(clip, planeno, vs.GRAY)
+        return vs.core.std.ShufflePlanes(clip, plane, vs.GRAY)
 
     def join(planes:List[vs.VideoNode], family:vs.ColorFamily=vs.YUV) -> vs.VideoNode:
 
@@ -101,21 +114,61 @@ class util:
 
         return [util.plane(clip, x) for x in range(clip.format.num_planes)]
 
-    def prewitt(clip:vs.VideoNode, planes:Optional[Union[int, List[int]]]=None):
+    def edge_detection(clip:vs.VideoNode, planes:Optional[Union[int,List[int]]]=None,
+        method:str="kirsch", thr:Optional[int]=None, scale:bool=False) -> vs.VideoNode:
 
         if planes is None:
             planes = list(range(clip.format.num_planes))
         elif isinstance(planes, int):
             planes = [planes]
 
-        return vs.core.std.Expr([clip.std.Convolution(matrix=[1, 1, 0, 1, 0, -1, 0, -1, -1], planes=planes, saturate=False),
-                            clip.std.Convolution(matrix=[1, 1, 1, 0, 0, 0, -1, -1, -1], planes=planes, saturate=False),
-                            clip.std.Convolution(matrix=[1, 0, -1, 1, 0, -1, 1, 0, -1], planes=planes, saturate=False),
-                            clip.std.Convolution(matrix=[0, -1, -1, 1, 0, -1, 1, 1, 0], planes=planes, saturate=False)],
-                            expr=['x y max z max a max' if i in planes else '' for i in range(clip.format.num_planes)])
+        max_value = 1 if clip.format.sample_type == vs.FLOAT else (1 << clip.format.bits_per_sample) - 1
 
-    def mt_expand_multi(src:vs.VideoNode, mode:str='rectangle', 
-        planes:Optional[Union[int, List[int]]]=None, sw:int=1, sh:int=1):
+        if method in ["t", "tcanny"]:
+            # Fastest
+            if thr is None: thr = 5
+            edge = vs.core.tcanny.TCanny(clip, mode=1, sigma=1)
+            # edge = vs.core.tcanny.TCanny(clip, sigma=1.25, t_h=4.0, t_l=1.0, op=1, mode=1) # Blue
+
+        elif method in ["p", "prewitt"]:
+            # Best??
+            if thr is None: thr = 15
+            edge = vs.core.std.Expr([
+                clip.std.Convolution(matrix=[1, 1, 0, 1, 0, -1, 0, -1, -1], planes=planes, saturate=False),
+                clip.std.Convolution(matrix=[1, 1, 1, 0, 0, 0, -1, -1, -1], planes=planes, saturate=False),
+                clip.std.Convolution(matrix=[1, 0, -1, 1, 0, -1, 1, 0, -1], planes=planes, saturate=False),
+                clip.std.Convolution(matrix=[0, -1, -1, 1, 0, -1, 1, 1, 0], planes=planes, saturate=False)],
+                expr=['x y max z max a max' if i in planes else '' for i in range(clip.format.num_planes)])
+
+        elif method in ["k", "kirsch"]:
+            # Slowest and maybe most chaotic
+            if thr is None: thr = 40
+            edge = vs.core.std.Expr([
+                clip.std.Convolution(matrix=[ 5,  5,  5, -3,  0, -3, -3, -3, -3], planes=planes, saturate=False),
+                clip.std.Convolution(matrix=[-3,  5,  5, -3,  0,  5, -3, -3, -3], planes=planes, saturate=False),
+                clip.std.Convolution(matrix=[-3, -3,  5, -3,  0,  5, -3, -3,  5], planes=planes, saturate=False),
+                clip.std.Convolution(matrix=[-3, -3, -3, -3,  0,  5, -3,  5,  5], planes=planes, saturate=False)],
+                expr=['x y max z max a max' if i in planes else '' for i in range(clip.format.num_planes)])
+        else:
+            raise ValueError("edge_detection: invalid method.")
+
+        if scale:
+            edge = vs.core.std.Expr([edge], expr=f'x {helper.scale255(thr, max_value)} < 0 x ?')
+
+        return edge
+
+    def retinex_edge(clip:vs.VideoNode, method="prewitt", sigma:int=1,
+        thr:Optional[int]=None, plane:int=0) -> vs.VideoNode:
+        # from kageunc
+
+        plane_clip = util.plane(clip, plane=plane)
+        max_value = 1 if clip.format.sample_type == vs.FLOAT else (1 << clip.format.bits_per_sample) - 1
+        ret = vs.core.retinex.MSRCP(plane_clip, sigma=[50, 200, 350], upper_thr=0.005)
+        tcanny = ret.tcanny.TCanny(mode=1, sigma=sigma).std.Minimum(coordinates=[1, 0, 1, 0, 0, 1, 0, 1])
+        return vs.core.std.Expr([util.edge_detection(plane_clip, method=method, thr=thr), tcanny], f'x y + {max_value} min')
+
+    def mt_expand_multi(clip:vs.VideoNode, mode:str='rectangle', 
+        planes:Optional[Union[int, List[int]]]=None, sw:int=1, sh:int=1) -> vs.VideoNode:
 
         if isinstance(planes, int):
             planes = [planes]
@@ -130,11 +183,11 @@ class util:
             mode_m = None
 
         if mode_m is not None:
-            src = util.mt_expand_multi(src.std.Maximum(planes=planes, coordinates=mode_m), mode=mode, planes=planes, sw=sw - 1, sh=sh - 1)
-        return src
+            clip = util.mt_expand_multi(clip.std.Maximum(planes=planes, coordinates=mode_m), mode=mode, planes=planes, sw=sw - 1, sh=sh - 1)
+        return clip
 
-    def mt_inpand_multi(src:vs.VideoNode, mode:str='rectangle', 
-        planes:Optional[Union[int, List[int]]]=None, sw:int=1, sh:int=1):
+    def mt_inpand_multi(clip:vs.VideoNode, mode:str='rectangle', 
+        planes:Optional[Union[int, List[int]]]=None, sw:int=1, sh:int=1) -> vs.VideoNode:
 
         if isinstance(planes, int):
             planes = [planes]
@@ -149,28 +202,28 @@ class util:
             mode_m = None
 
         if mode_m is not None:
-            src = util.mt_inpand_multi(src.std.Minimum(planes=planes, coordinates=mode_m), mode=mode, planes=planes, sw=sw - 1, sh=sh - 1)
-        return src
+            clip = util.mt_inpand_multi(clip.std.Minimum(planes=planes, coordinates=mode_m), mode=mode, planes=planes, sw=sw - 1, sh=sh - 1)
+        return clip
 
-    def mt_inflate_multi(src:vs.VideoNode, planes:Optional[Union[int, List[int]]]=None, radius:int=1):
-
-        if isinstance(planes, int):
-            planes = [planes]
-
-        for i in range(radius):
-            src = vs.core.std.Inflate(src, planes=planes)
-        return src
-
-    def mt_deflate_multi(src:vs.VideoNode, planes:Optional[Union[int, List[int]]]=None, radius:int=1):
+    def mt_inflate_multi(clip:vs.VideoNode, planes:Optional[Union[int, List[int]]]=None, radius:int=1) -> vs.VideoNode:
 
         if isinstance(planes, int):
             planes = [planes]
 
         for i in range(radius):
-            src = vs.core.std.Deflate(src, planes=planes)
-        return src
+            clip = vs.core.std.Inflate(clip, planes=planes)
+        return clip
 
-    def check_color_family(color_family:str, valid_list:List[str]=None, invalid_list:Optional[List[str]]=None):
+    def mt_deflate_multi(clip:vs.VideoNode, planes:Optional[Union[int, List[int]]]=None, radius:int=1) -> vs.VideoNode:
+
+        if isinstance(planes, int):
+            planes = [planes]
+
+        for i in range(radius):
+            clip = vs.core.std.Deflate(clip, planes=planes)
+        return clip
+
+    def check_color_family(color_family:str, valid_list:List[str]=None, invalid_list:Optional[List[str]]=None) -> vs.VideoNode:
 
         if valid_list is None:
             valid_list = ('RGB', 'YUV', 'GRAY')
@@ -185,9 +238,42 @@ class util:
             if color_family not in [getattr(vs, cf, None) for cf in valid_list]:
                 raise value_error(f'color family not supported, only {valid_list} are accepted')
 
+    def min_blur(clip:vs.VideoNode, r:int=1, planes:Optional[Union[int, List[int]]]=None) -> vs.VideoNode:
+        # by Didée (http://avisynth.nl/index.php/MinBlur)
+        # Nifty Gauss/Median combination
+
+        if planes is None:
+            planes = list(range(clip.format.num_planes))
+        elif isinstance(planes, int):
+            planes = [planes]
+
+        matrix1 = [1, 2, 1, 2, 4, 2, 1, 2, 1]
+        matrix2 = [1, 1, 1, 1, 1, 1, 1, 1, 1]
+
+        if r <= 0:
+            RG11 = sbr(clip, planes=planes)
+            RG4 = clip.std.Median(planes=planes)
+        elif r == 1:
+            RG11 = clip.std.Convolution(matrix=matrix1, planes=planes)
+            RG4 = clip.std.Median(planes=planes)
+        elif r == 2:
+            RG11 = clip.std.Convolution(matrix=matrix1, planes=planes).std.Convolution(matrix=matrix2, planes=planes)
+            RG4 = clip.ctmf.CTMF(radius=2, planes=planes)
+        else:
+            RG11 = clip.std.Convolution(matrix=matrix1, planes=planes).std.Convolution(matrix=matrix2, planes=planes).std.Convolution(matrix=matrix2, planes=planes)
+            if clip.format.bits_per_sample == 16:
+                s16 = clip
+                RG4 = clip.fmtc.bitdepth(bits=12, planes=planes, dmode=1).ctmf.CTMF(radius=3, planes=planes).fmtc.bitdepth(bits=16, planes=planes)
+                RG4 = util.limit_filter(s16, RG4, thr=0.0625, elast=2, planes=planes)
+            else:
+                RG4 = clip.ctmf.CTMF(radius=3, planes=planes)
+
+        expr = 'x y - x z - * 0 < x x y - abs x z - abs < y z ? ?'
+        return vs.core.std.Expr([clip, RG11, RG4], expr=[expr if i in planes else '' for i in range(clip.format.num_planes)])
+
     def limit_filter(flt:vs.VideoNode, src:vs.VideoNode, ref:Optional[vs.VideoNode]=None,
         thr:Optional[float]=None, elast:Optional[float]=None, planes:Optional[Union[int, List[int]]]=None, 
-        brighten_thr:Optional[float]=None, thrc:Optional[float]=None, force_expr:bool=True):
+        brighten_thr:Optional[float]=None, thrc:Optional[float]=None, force_expr:bool=True) -> vs.VideoNode:
         # from mvsfunc
 
         # It acts as a post-processor, and is very useful to limit the difference of filtering while avoiding artifacts.
@@ -230,7 +316,7 @@ class util:
         #         - False: use the std.Lut implementation if available
         #         default: True
 
-        def _limit_filter_expr(defref, thr, elast, largen_thr, value_range):
+        def _limit_filter_expr(defref, thr, elast, largen_thr, value_range) -> str:
 
             flt = " x "
             src = " y "
@@ -454,39 +540,6 @@ class util:
 
         # Output
         return clip
-
-    def min_blur(clip:vs.VideoNode, r:int=1, planes:Optional[Union[int, List[int]]]=None):
-        # by Didée (http://avisynth.nl/index.php/MinBlur)
-        # Nifty Gauss/Median combination
-
-        if planes is None:
-            planes = list(range(clip.format.num_planes))
-        elif isinstance(planes, int):
-            planes = [planes]
-
-        matrix1 = [1, 2, 1, 2, 4, 2, 1, 2, 1]
-        matrix2 = [1, 1, 1, 1, 1, 1, 1, 1, 1]
-
-        if r <= 0:
-            RG11 = sbr(clip, planes=planes)
-            RG4 = clip.std.Median(planes=planes)
-        elif r == 1:
-            RG11 = clip.std.Convolution(matrix=matrix1, planes=planes)
-            RG4 = clip.std.Median(planes=planes)
-        elif r == 2:
-            RG11 = clip.std.Convolution(matrix=matrix1, planes=planes).std.Convolution(matrix=matrix2, planes=planes)
-            RG4 = clip.ctmf.CTMF(radius=2, planes=planes)
-        else:
-            RG11 = clip.std.Convolution(matrix=matrix1, planes=planes).std.Convolution(matrix=matrix2, planes=planes).std.Convolution(matrix=matrix2, planes=planes)
-            if clip.format.bits_per_sample == 16:
-                s16 = clip
-                RG4 = clip.fmtc.bitdepth(bits=12, planes=planes, dmode=1).ctmf.CTMF(radius=3, planes=planes).fmtc.bitdepth(bits=16, planes=planes)
-                RG4 = mvf.limit_filter(s16, RG4, thr=0.0625, elast=2, planes=planes)
-            else:
-                RG4 = clip.ctmf.CTMF(radius=3, planes=planes)
-
-        expr = 'x y - x z - * 0 < x x y - abs x z - abs < y z ? ?'
-        return vs.core.std.Expr([clip, RG11, RG4], expr=[expr if i in planes else '' for i in range(clip.format.num_planes)])
 
 class output:
     def rav1e(clip:vs.VideoNode, file_str:str, speed:int=6, scd_speed:int=1,
@@ -856,7 +909,7 @@ class output:
         tiles_row:Optional[int]=None, tiles_col:Optional[int]=None,
         enable_cdef:bool=True, enable_restoration:Optional[bool]=None, 
         enable_chroma_deltaq:bool=True, arnr_strength:int=2,
-        arnr_max_frames:int=5, threads:int=4, mux:str='ivf', executable='ffmpeg'):
+        arnr_max_frames:int=5, threads:int=4, mux:str='nut', executable='ffmpeg'):
 
         if clip.format.name not in ["YUV420P8", "YUV422P8", "YUV444P8", "YUV420P10", "YUV422P10", "YUV444P10", "YUV420P12", "YUV422P12", "YUV444P12", "Gray8", "Gray10", "Gray12", "RGB24", "RGB30", "RGB36"]:
             raise vs.Error(f"Pixel format must be one of `YUV420P8, YUV422P8, YUV444P8, YUV420P10, YUV422P10, YUV444P10, YUV420P12, YUV422P12, YUV444P12, Gray8, Gray10, Gray12, RGB24, RGB30, RGB36` currently {clip.format.name}")
@@ -960,7 +1013,8 @@ class output:
             process.stdin.close()
         file.close()
 
-def boundary_pad(clip:vs.VideoNode, boundary_width:int, boundary_height:int, x:int=50, y:int=50) -> vs.VideoNode:
+def boundary_pad(clip:vs.VideoNode, boundary_width:int, boundary_height:int,
+    x:int=50, y:int=50) -> vs.VideoNode:
 
     if (boundary_width > clip.width) or (boundary_height > clip.height):
         clip = vs.core.std.AddBorders(clip,
@@ -1105,6 +1159,92 @@ def ssim_downsample(clip:vs.VideoNode, width:int, height:int, smooth:Union[int,f
 
     return d
 
+def nnedi3_rpow2(clip:vs.VideoNode, rfactor:int=2, correct_shift:bool=True,
+    width:Optional[int]=None, height:Optional[int]=None,
+    kernel:str="didée", nsize:int=0, nns:int=2, qual:int=2, etype:int=0, 
+    pscrn:Optional[int]=None, opt:bool=True, 
+    int16_prescreener:bool=True, int16_predictor:bool=True, exp:int=0) -> vs.VideoNode:
+
+    # nnedi3_rpow2 is for enlarging images by powers of 2.
+
+    # Parameters:
+    #   rfactor (int): Image enlargement factor.
+    #       Must be a power of 2 in the range [2 to 1024].
+    #   correct_shift (bool): If False, the shift is not corrected.
+    #       The correction is accomplished by using the subpixel
+    #       cropping capability of fmtc's resizers.
+    #   width (int): If correcting the image center shift by using the
+    #       "correct_shift" parameter, width/height allow you to set a
+    #       new output resolution.
+    #   kernel (string): Sets the resizer used for correcting the image
+    #       center shift that nnedi3_rpow2 introduces.
+    #   nsize, nns, qual, etype, pscrn, opt, int16_prescreener,
+    #   int16_predictor, exp:
+    #       See https://github.com/sekrit-twc/znedi3
+
+    if width is None:
+        width = clip.width*rfactor
+    if height is None:
+        height = clip.height*rfactor
+    hshift = 0.0
+    vshift = -0.5
+
+    nnedi_kwargs = dict(dh=True, nsize=nsize, nns=nns, qual=qual, etype=etype,
+                    pscrn=pscrn, opt=opt, int16_prescreener=int16_prescreener,
+                    int16_predictor=int16_predictor, exp=exp)
+    chroma_kwargs = dict(sy=-0.5, planes=[2, 3, 3])
+    kernel_kwargs = util.fmtc_kernel_kwargs(kernel)
+
+    tmp = 1
+    times = 0
+    while tmp < rfactor:
+        tmp *= 2
+        times += 1
+
+    # Checks
+
+    if rfactor < 2 or rfactor > 1024:
+        raise ValueError("nnedi3_rpow2: rfactor must be between 2 and 1024")
+
+    if tmp != rfactor:
+        raise ValueError("nnedi3_rpow2: rfactor must be a power of 2")
+
+    if hasattr(vs.core, 'nnedi3') is not True:
+        raise RuntimeError("nnedi3_rpow2: nnedi3 plugin is required")
+
+    if correct_shift or clip.format.subsampling_h:
+        if hasattr(vs.core, 'fmtc') is not True:
+            raise RuntimeError("nnedi3_rpow2: fmtconv plugin is required")
+
+    last = clip
+
+    for i in range(times):
+        field = 1 if i == 0 else 0
+        last = vs.core.nnedi3.nnedi3(last, field=field, **nnedi_kwargs)
+        last = vs.core.std.Transpose(last)
+        if last.format.subsampling_w:
+            # Apparently always using field=1 for the horizontal pass somehow
+            # keeps luma/chroma alignment.
+            field = 1
+            hshift = hshift*2 - 0.5
+        else:
+            hshift = -0.5
+        last = vs.core.nnedi3.nnedi3(last, field=field, **nnedi_kwargs)
+        last = vs.core.std.Transpose(last)
+
+    # Correct vertical shift of the chroma.
+
+    if clip.format.subsampling_h:
+        last = vs.core.fmtc.resample(last, w=last.width, h=last.height, **chroma_kwargs, **kernel_kwargs)
+
+    if correct_shift is True:
+        last = vs.core.fmtc.resample(last, w=width, h=height, sx=hshift, sy=vshift, **kernel_kwargs)
+
+    if last.format.id != clip.format.id:
+        last = vs.core.fmtc.bitdepth(last, csp=clip.format.id)
+
+    return last
+
 def boundary_resize(clip:vs.VideoNode, width:Optional[int]=None,
     height:Optional[int]=None, scale:Optional[Union[int, float]]=None,
     multiple:int=2, crop:bool=False, kernel:str="didée",
@@ -1132,8 +1272,8 @@ def boundary_resize(clip:vs.VideoNode, width:Optional[int]=None,
             raise vs.Error("boundary_resize: Must specify width, height or scale")
 
         if multiple > 1 and not crop:
-            new_width  = math.floor(new_width/multiple)*multiple
-            new_height = math.floor(new_height/multiple)*multiple
+            new_width  = helper.mod_m(new_width, multiple)
+            new_height = helper.mod_m(new_height, multiple)
         scale_kwargs = {"w": new_width, "h": new_height}
 
     if ssim:
@@ -1142,32 +1282,50 @@ def boundary_resize(clip:vs.VideoNode, width:Optional[int]=None,
         clip = resize(clip, height=new_height, width=new_width, kernel=kernel)
 
     if multiple > 1 and crop:
-        new_height_div = math.floor(new_height/multiple)*multiple
-        new_width_div  = math.floor(new_width/multiple)*multiple
+        new_width_div  = helper.mod_m(new_width, multiple)
+        new_height_div = helper.mod_m(new_height, multiple)
         if new_height_div != new_height or new_width_div != new_width:
             clip = vs.core.std.CropAbs(clip=clip, height=new_height_div,
                                                     width=new_width_div)
 
     return clip
 
-def down_to_444(clip:vs.VideoNode, width:Optional[int]=None, height:Optional[int]=None,
-    resize_kernel_y="spline36", resize_kernel_uv="spline16") -> vs.VideoNode:
+def down_to_444(clip:vs.VideoNode, kernel:str="didée") -> vs.VideoNode:
     # 4k 420 -> 1080p 444
 
-    if source.format.color_family != vs.YUV:
+    if clip.format.color_family != vs.YUV:
         raise vs.Error('down_to_444: only YUV format is supported')
 
-    if width is None: width = clip.width/2
-    if height is None: height = clip.height/2
+    y = vs.core.std.ShufflePlanes(clip, planes=0, colorfamily=vs.GRAY)
+    u = vs.core.std.ShufflePlanes(clip, planes=1, colorfamily=vs.GRAY)
+    v = vs.core.std.ShufflePlanes(clip, planes=2, colorfamily=vs.GRAY)
+
+    height = u.height
+    width  = u.width
+
+    y = resize(clip=y, height=height, width=width, kernel=kernel)
+    u = resize(clip=u, height=height, width=width, kernel=kernel)
+    v = resize(clip=v, height=height, width=width, kernel=kernel)
+
+    clip = vs.core.std.ShufflePlanes(clips=[y,u,v], planes=[0,0,0], colorfamily=vs.YUV)
+    return clip
+
+def up_to_444(clip:vs.VideoNode, kernel:str="robidoux") -> vs.VideoNode:
+    # 4k 420 -> 4k 444
+
+    if clip.format.color_family != vs.YUV:
+        raise vs.Error('down_to_444: only YUV format is supported')
 
     y = vs.core.std.ShufflePlanes(clip, planes=0, colorfamily=vs.GRAY)
-    y = resize(clip=y, height=height, width=width, kernel=resize_kernel_y)
-
     u = vs.core.std.ShufflePlanes(clip, planes=1, colorfamily=vs.GRAY)
-    u = resize(clip=u, height=height, width=width, kernel=resize_kernel_uv)
-    
     v = vs.core.std.ShufflePlanes(clip, planes=2, colorfamily=vs.GRAY)
-    v = resize(clip=v, height=height, width=width, kernel=resize_kernel_uv)
+
+    height = y.height
+    width  = y.width
+
+    y = resize(clip=y, height=height, width=width, kernel=kernel)
+    u = resize(clip=u, height=height, width=width, kernel=kernel)
+    v = resize(clip=v, height=height, width=width, kernel=kernel)
 
     clip = vs.core.std.ShufflePlanes(clips=[y,u,v], planes=[0,0,0], colorfamily=vs.YUV)
     return clip
@@ -1296,7 +1454,8 @@ def bt2390_ictcp(clip:vs.VideoNode, source_peak:Optional[int]=None,
     clip = vs.core.resize.Spline36(clip=clip, format=vs.YUV444P16, matrix_s="709", filter_param_a=0, filter_param_b=0.75, range_in_s="full", range_s="limited", chromaloc_in_s="center", chromaloc_s="center", dither_type="none")
     return clip
 
-def imwri_src(dir:str, fpsnum:int, fpsden:int, firstnum:int=0, alpha:bool=False, ext:str=".png") -> vs.VideoNode:
+def imwri_src(dir:str, fpsnum:int, fpsden:int, firstnum:int=0,
+    alpha:bool=False, ext:str=".png") -> vs.VideoNode:
 
     srcs = [dir + src for src in os.listdir(dir) if src.endswith(ext)]
     clip = vs.core.imwri.Read(srcs, firstnum=firstnum, alpha=alpha)
@@ -1552,7 +1711,7 @@ def HQDeringmod(clip:vs.VideoNode, p:Optional[vs.VideoNode]=None,
     ringmask:Optional[vs.VideoNode]=None, mrad:int=1, msmooth:int=1,
     incedge:bool=False, mthr:int=60, minp:int=1, nrmode:Optional[int]=None,
     sharp:int=1, drrep:int=24, thr:float=12.0, elast:float=2.0,
-    darkthr:Optional[float]=None, planes:List[int]=[0], show:bool=False):
+    darkthr:Optional[float]=None, planes:List[int]=[0], show:bool=False) -> vs.VideoNode:
     # original script by mawen1250, taken from havsfunc
 
     # Applies deringing by using a smart smoother near edges (where ringing occurs) only
@@ -1561,9 +1720,9 @@ def HQDeringmod(clip:vs.VideoNode, p:Optional[vs.VideoNode]=None,
     #  mrad (int): Expanding of edge mask, higher value means more aggressive processing. Default is 1
     #  msmooth (int): Inflate of edge mask, smooth boundaries of mask. Default is 1
     #  incedge (bool): Whether to include edge in ring mask, by default ring mask only include area near edges. Default is false
-    #  mthr (int): Threshold of sobel edge mask, lower value means more aggressive processing. Or define your own mask clip "ringmask". Default is 60
+    #  mthr (int): Threshold of prewitt edge mask, lower value means more aggressive processing. Or define your own mask clip "ringmask". Default is 60
     #            But for strong ringing, lower value will treat some ringing as edge, which protects this ringing from being processed.
-    #  minp (int): Inpanding of sobel edge mask, higher value means more aggressive processing. Default is 1
+    #  minp (int): Inpanding of prewitt edge mask, higher value means more aggressive processing. Default is 1
     #  nrmode (int): Kernel of dering - 1: min_blur(radius=1), 2: min_blur(radius=2), 3: min_blur(radius=3). Or define your own smoothed clip "p". Default is 2 for HD / 1 for SD
     #  sharp (int): Whether to use contra-sharpening to resharp deringed clip, 1-3 represents radius, 0 means no sharpening. Default is 1
     #  drrep (int): Use repair for details retention, recommended values are 24/23/13/12/1. Default is 24
@@ -1635,8 +1794,7 @@ def HQDeringmod(clip:vs.VideoNode, p:Optional[vs.VideoNode]=None,
 
     # Post-Process: Ringing Mask Generating
     if ringmask is None:
-        expr = f'x {helper.scale255(mthr, peak)} < 0 x ?'
-        prewittm = util.prewitt(clip, planes=[0]).std.Expr(expr=[expr] if isGray else [expr, ''])
+        prewittm = util.edge_detection(clip, planes=[0], thr=mthr, method="prewitt", scale=True)
         fmask = vs.core.misc.Hysteresis(prewittm.std.Median(planes=[0]), prewittm, planes=[0])
         if mrad > 0:
             omask = util.mt_expand_multi(fmask, planes=[0], sw=mrad, sh=mrad)
@@ -1669,95 +1827,9 @@ def HQDeringmod(clip:vs.VideoNode, p:Optional[vs.VideoNode]=None,
     else:
         return vs.core.std.MaskedMerge(clip, limitclp, ringmask, planes=planes, first_plane=True)
 
-def nnedi3_rpow2(clip:vs.VideoNode, rfactor:int=2, correct_shift:bool=True,
-    width:Optional[int]=None, height:Optional[int]=None,
-    kernel:str="didée", nsize:int=0, nns:int=2, qual:int=2, etype:int=0, 
-    pscrn:Optional[int]=None, opt:bool=True, 
-    int16_prescreener:bool=True, int16_predictor:bool=True, exp:int=0):
-
-    # nnedi3_rpow2 is for enlarging images by powers of 2.
-
-    # Parameters:
-    #   rfactor (int): Image enlargement factor.
-    #       Must be a power of 2 in the range [2 to 1024].
-    #   correct_shift (bool): If False, the shift is not corrected.
-    #       The correction is accomplished by using the subpixel
-    #       cropping capability of fmtc's resizers.
-    #   width (int): If correcting the image center shift by using the
-    #       "correct_shift" parameter, width/height allow you to set a
-    #       new output resolution.
-    #   kernel (string): Sets the resizer used for correcting the image
-    #       center shift that nnedi3_rpow2 introduces.
-    #   nsize, nns, qual, etype, pscrn, opt, int16_prescreener,
-    #   int16_predictor, exp:
-    #       See https://github.com/sekrit-twc/znedi3
-
-    if width is None:
-        width = clip.width*rfactor
-    if height is None:
-        height = clip.height*rfactor
-    hshift = 0.0
-    vshift = -0.5
-
-    nnedi_kwargs = dict(dh=True, nsize=nsize, nns=nns, qual=qual, etype=etype,
-                    pscrn=pscrn, opt=opt, int16_prescreener=int16_prescreener,
-                    int16_predictor=int16_predictor, exp=exp)
-    chroma_kwargs = dict(sy=-0.5, planes=[2, 3, 3])
-    kernel_kwargs = util.fmtc_kernel_kwargs(kernel)
-
-    tmp = 1
-    times = 0
-    while tmp < rfactor:
-        tmp *= 2
-        times += 1
-
-    # Checks
-
-    if rfactor < 2 or rfactor > 1024:
-        raise ValueError("nnedi3_rpow2: rfactor must be between 2 and 1024")
-
-    if tmp != rfactor:
-        raise ValueError("nnedi3_rpow2: rfactor must be a power of 2")
-
-    if hasattr(vs.core, 'nnedi3') is not True:
-        raise RuntimeError("nnedi3_rpow2: nnedi3 plugin is required")
-
-    if correct_shift or clip.format.subsampling_h:
-        if hasattr(vs.core, 'fmtc') is not True:
-            raise RuntimeError("nnedi3_rpow2: fmtconv plugin is required")
-
-    last = clip
-
-    for i in range(times):
-        field = 1 if i == 0 else 0
-        last = vs.core.nnedi3.nnedi3(last, field=field, **nnedi_kwargs)
-        last = vs.core.std.Transpose(last)
-        if last.format.subsampling_w:
-            # Apparently always using field=1 for the horizontal pass somehow
-            # keeps luma/chroma alignment.
-            field = 1
-            hshift = hshift*2 - 0.5
-        else:
-            hshift = -0.5
-        last = vs.core.nnedi3.nnedi3(last, field=field, **nnedi_kwargs)
-        last = vs.core.std.Transpose(last)
-
-    # Correct vertical shift of the chroma.
-
-    if clip.format.subsampling_h:
-        last = vs.core.fmtc.resample(last, w=last.width, h=last.height, **chroma_kwargs, **kernel_kwargs)
-
-    if correct_shift is True:
-        last = vs.core.fmtc.resample(last, w=width, h=height, sx=hshift, sy=vshift, **kernel_kwargs)
-
-    if last.format.id != clip.format.id:
-        last = vs.core.fmtc.bitdepth(last, csp=clip.format.id)
-
-    return last
-
 def fine_sharp(clip:vs.VideoNode, mode:int=1, 
-    sstr:float=2.5, cstr:Optional[float]=None, xstr:float=0, lstr:float=1.5,
-    pstr:float=1.28, ldmp:Optional[float]=None, hdmp:float=0.01, rep:int=12):
+    sharp_str:float=2.5, equal_str:Optional[float]=None, xsharp_str:float=0, nl_sharp_mod:float=1.5,
+    nl_sharp_exp:float=1.28, low_damp:Optional[float]=None, high_damp:float=0.01, rep:int=12) -> vs.VideoNode:
 
     # Original author: Didée (https://forum.doom9.org/showthread.php?t=166082)
     # Small and relatively fast realtime-sharpening function, for 1080p,
@@ -1773,15 +1845,15 @@ def fine_sharp(clip:vs.VideoNode, mode:int=1,
     # Args:
     #     mode (int): 1 to 3, weakest to strongest. When negative -1 to -3,
     #                    a broader kernel for equalisation is used.
-    #     sstr (float): strength of sharpening.
-    #     cstr (float): strength of equalisation (recommended 0.5 to 1.25)
-    #     xstr (float): strength of XSharpen-style final sharpening, 0.0 to 1.0.
+    #     sharp_str (float): strength of sharpening.
+    #     equal_str (float): strength of equalisation (recommended 0.5 to 1.25)
+    #     xsharp_str (float): strength of XSharpen-style final sharpening, 0.0 to 1.0.
     #                    (but, better don't go beyond 0.25...)
-    #     lstr (float): modifier for non-linear sharpening.
-    #     pstr (float): exponent for non-linear sharpening.
-    #     ldmp (float): "low damp", to not over-enhance very small differences.
+    #     nl_sharp_mod (float): modifier for non-linear sharpening.
+    #     nl_sharp_exp (float): exponent for non-linear sharpening.
+    #     low_damp (float): "low damp", to not over-enhance very small differences.
     #                    (noise coming out of flat areas)
-    #     hdmp (float): "high damp", this damping term has a larger effect than ldmp
+    #     high_damp (float): "high damp", this damping term has a larger effect than low_damp
     #                     when the sharp-difference is larger than 1, vice versa.
     #     rep (int): repair mode used in final sharpening, recommended modes are 1/12/13.
 
@@ -1843,20 +1915,20 @@ def fine_sharp(clip:vs.VideoNode, mode:int=1,
     if not isinstance(clip, vs.VideoNode):
         raise TypeError("FineSharp: This is not a clip!")
 
-    if cstr is None:
-        cstr = spline(sstr, {0: 0, 0.5: 0.1, 1: 0.6, 2: 0.9, 2.5: 1, 3: 1.1, 3.5: 1.15, 4: 1.2, 8: 1.25, 255: 1.5})
-        cstr **= 0.8 if mode > 0 else cstr
+    if equal_str is None:
+        equal_str = spline(sharp_str, {0: 0, 0.5: 0.1, 1: 0.6, 2: 0.9, 2.5: 1, 3: 1.1, 3.5: 1.15, 4: 1.2, 8: 1.25, 255: 1.5})
+        equal_str **= 0.8 if mode > 0 else equal_str
 
-    if ldmp is None:
-        ldmp = sstr
+    if low_damp is None:
+        low_damp = sharp_str
 
-    sstr = max(sstr, 0)
-    cstr = max(cstr, 0)
-    xstr = min(max(xstr, 0), 1)
-    ldmp = max(ldmp, 0)
-    hdmp = max(hdmp, 0)
+    sharp_str = max(sharp_str, 0)
+    equal_str = max(equal_str, 0)
+    xsharp_str = min(max(xsharp_str, 0), 1)
+    low_damp = max(low_damp, 0)
+    high_damp = max(high_damp, 0)
 
-    if sstr < 0.01 and cstr < 0.01 and xstr < 0.01:
+    if sharp_str < 0.01 and equal_str < 0.01 and xsharp_str < 0.01:
         return clip
 
     tmp = vs.core.std.ShufflePlanes(clip, [0], vs.GRAY) if color in [vs.YUV] else clip
@@ -1868,21 +1940,40 @@ def fine_sharp(clip:vs.VideoNode, mode:int=1,
     if abs(mode) == 3:
         c2 = c2.std.Median()
     
-    if sstr >= 0.01:
+    if sharp_str >= 0.01:
         expr = 'x y = x dup {} dup dup dup abs {} / {} pow swap3 abs {} + / swap dup * dup {} + / * * {} * + ?'
-        shrp = vs.core.std.Expr([tmp, c2], [expr.format(xy, lstr, 1/pstr, hdmp, ldmp, sstr*i)])
+        shrp = vs.core.std.Expr([tmp, c2], [expr.format(xy, nl_sharp_mod, 1/nl_sharp_exp, high_damp, low_damp, sharp_str*i)])
 
-        if cstr >= 0.01:
+        if equal_str >= 0.01:
             diff = vs.core.std.MakeDiff(shrp, tmp)
-            if cstr != 1:
-                expr = 'x {} *'.format(cstr) if isFLOAT else 'x {} - {} * {} +'.format(mid, cstr, mid)
+            if equal_str != 1:
+                expr = 'x {} *'.format(equal_str) if isFLOAT else 'x {} - {} * {} +'.format(mid, equal_str, mid)
                 diff = vs.core.std.Expr([diff], [expr])
             diff = vs.core.std.Convolution(diff, matrix=mat1) if mode > 0 else vs.core.std.Convolution(diff, matrix=mat2)
             shrp = vs.core.std.MakeDiff(shrp, diff)
 
-    if xstr >= 0.01:
+    if xsharp_str >= 0.01:
         xyshrp = vs.core.std.Expr([shrp, vs.core.std.Convolution(shrp, matrix=mat2)], ['x dup y - 9.69 * +'])
         rpshrp = R(xyshrp, shrp, [rep])
-        shrp = vs.core.std.Merge(shrp, rpshrp, [xstr])
+        shrp = vs.core.std.Merge(shrp, rpshrp, [xsharp_str])
 
     return vs.core.std.ShufflePlanes([shrp, clip], [0, 1, 2], color) if color in [vs.YUV] else shrp
+
+def retinex_deband(clip:vs.VideoNode, preset:str="high/nograin",
+    f3kdb_kwargs:dict={}, method:str="p", thr:Optional[int]=None) -> vs.VideoNode:
+
+    # https://f3kdb.readthedocs.io/en/stable/usage.html
+
+    # presets
+    # depth 	y=0/cb=0/cr=0/grainy=0/grainc=0
+    # low 	    y=32/cb=32/cr=32/grainy=32/grainc=32
+    # medium 	y=48/cb=48/cr=48/grainy=48/grainc=48
+    # high 	    y=64/cb=64/cr=64/grainy=64/grainc=64
+    # veryhigh 	y=80/cb=80/cr=80/grainy=80/grainc=80
+    # nograin 	grainy=0/grainc=0
+    # luma 	    cb=0/cr=0/grainc=0
+    # chroma 	y=0/grainy=0
+
+    mask = util.retinex_edge(clip, method=method, thr=thr).std.Inflate()
+    deband = vs.core.neo_f3kdb.Deband(clip, preset=preset, **f3kdb_kwargs)
+    return vs.core.std.MaskedMerge(clipa=deband, clipb=clip, mask=mask)
