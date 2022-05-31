@@ -25,6 +25,39 @@ from typing import Optional, Union, List, NamedTuple, Literal
 # https://github.com/HomeOfAviSynthPlusEvolution/neo_f3kdb
 # https://f3kdb.readthedocs.io/en/stable/usage.html
 
+
+
+class check:
+
+    #-----------------------------------------------------------------------
+    # check functions
+
+    # check_deps(["fmtc", "mv", "mvsf"])
+    # check_fmt(clip, ["yuv", "-444"]) # yuv and not 444
+    # check_fmt(clip, ["32"]) # RGB 32 float
+    # check_fmt(clip, ["-RGB"]) # anything but RGB
+    # check_fmt_clips([clipa, clipb]) # clips must be of same formats
+
+    # #-----------
+    # import inspect
+
+    # def first():
+    #     return second()
+
+    # def second():
+    #     return inspect.getouterframes( inspect.currentframe() )[1]
+
+    # first()[3] # 'first'
+    # #-----------
+    #-----------------------------------------------------------------------
+
+    def deps(deps:List[str]):
+        pass
+    def fmt(clips:Union[List[vs.VideoNode],vs.VideoNode], fmts:List[str]):
+        pass
+    def fmt_multi(clips:List[vs.VideoNode], fmts:Optional[List[str]]):
+        pass
+
 class helper:
 
     def round_to_closest(x:Union[int, float]) -> int:
@@ -68,7 +101,8 @@ class util:
             kernel_kwargs = {"kernel": "lanczos", "taps": taps}
         elif kernel == "spline144":
             kernel_kwargs = {"kernel": "spline", "taps": 6}
-        # Bicubics
+
+        # Bicubic
         elif kernel in ["didée", "didee"]:
             kernel_kwargs = {"kernel": "bicubic", "a1": -1/2, "a2": 1/4}
         elif kernel in ["mitchell", "mitchell-netravali"]:
@@ -92,6 +126,39 @@ class util:
                             "a2": 7 / (2 + 12 * math.sqrt(2))}
         elif kernel == "bspline":
             kernel_kwargs = {"kernel": "bicubic", "a1": 1, "a2": 0}
+
+        # Impulse
+        elif kernel in ["parzen–rosenblatt", "parzen", "kde"]:
+            impulse = [0.666667, 0.648727, 0.596804, 0.51624, 0.415088, 0.303095,
+            0.190509, 0.086876, 0, -0.064824, -0.105205, -0.121655, -0.117225,
+            -0.096848, -0.0665116, -0.032382, 0, 0.026335, 0.0439404, 0.051856,
+            0.0506892, 0.042271, 0.0291773, 0.014224, 0, -0.011489, -0.0190243,
+            -0.022227, -0.0214634, -0.017647, -0.0119891, -0.005745, 0, 0.004475,
+            0.00727292, 0.008338, 0.00789788, 0.006366, 0.00423604, 0.001986, 0,
+            -0.001471, -0.00232189, -0.002577, -0.00235492, -0.001824, -0.00116114,
+            -0.000518, 0, 0.000341, 0.000502619, 0.000515, 0.000430408, 0.000301,
+            0.000169602, 0.000066, 0, -0.00003, -0.0000341078, -0.000025,
+            -0.0000138158, -0.000005, -0.00000118185, 0]
+            kernel_kwargs = {"kernel": "impulse",
+            "impulse": [*impulse[:-1], *impulse[::-1]]}
+        elif kernel in ["kaiser–bessel ", "kaiser"]:
+            impulse = [1, 0.973784, 0.897692, 0.779078, 0.629225, 0.462012,
+            0.29231, 0.134312, 0, -0.102037, -0.167326, -0.195688, -0.190881,
+            -0.159791, -0.111303, -0.055016, 0, 0.046264, 0.0786285, 0.094631,
+            0.0944555, 0.080540, 0.0569238, 0.028458, 0, -0.024290, -0.0414535,
+            -0.050006, -0.0499464, -0.042553, -0.0300094, -0.014951, 0, 0.012629,
+            0.0214054, 0.025619, 0.0253622, 0.021395, 0.0149254, 0.007348, 0,
+            -0.006043, -0.0100898, -0.011883, -0.0115622, -0.009575, -0.00654779,
+            -0.003156, 0, 0.002475, 0.00402406, 0.004606, 0.00434445, 0.003478,
+            0.00229289, 0.001061, 0, -0.000757, -0.0011651, -0.001252, -0.00109846,
+            -0.000808, -0.000481802, -0.000197]
+            import numpy as np
+            window = np.kaiser(51, 14)
+            n = np.linalg.norm(window)
+            impulse = window/n
+            kernel_kwargs = {"kernel": "impulse",
+            "impulse": [*impulse[:-1], *impulse[::-1]]}
+
         else:
             raise vs.Error("fmtc_kernel_kwargs: unkown kernel")
         return kernel_kwargs
@@ -1026,7 +1093,8 @@ def boundary_pad(clip:vs.VideoNode, boundary_width:int, boundary_height:int,
 
 def resize(clip:vs.VideoNode, width:Optional[int]=None,
     height:Optional[int]=None, scale:Optional[Union[int, float]]=None,
-    kernel:str="didée", taps:Optional[int]=None) -> vs.VideoNode:
+    kernel:str="didée", taps:Optional[int]=None,
+    csp:Optional[int]=None, css:Optional[str]=None) -> vs.VideoNode:
 
     if hasattr(vs.core, 'fmtc') is not True:
         raise RuntimeError("resize: fmtconv plugin is required")
@@ -1040,7 +1108,7 @@ def resize(clip:vs.VideoNode, width:Optional[int]=None,
 
     kernel_kwargs = util.fmtc_kernel_kwargs(kernel, taps)
 
-    clip = vs.core.fmtc.resample(clip, **scale_kwargs, **kernel_kwargs)
+    clip = vs.core.fmtc.resample(clip, **scale_kwargs, **kernel_kwargs, csp=csp, css=css)
     return clip
 
 def ssim_downsample(clip:vs.VideoNode, width:int, height:int, smooth:Union[int,float]=1,
@@ -1162,8 +1230,8 @@ def ssim_downsample(clip:vs.VideoNode, width:int, height:int, smooth:Union[int,f
 def nnedi3_rpow2(clip:vs.VideoNode, rfactor:int=2, correct_shift:bool=True,
     width:Optional[int]=None, height:Optional[int]=None,
     kernel:str="didée", nsize:int=0, nns:int=2, qual:int=2, etype:int=0, 
-    pscrn:Optional[int]=None, opt:bool=True, 
-    int16_prescreener:bool=True, int16_predictor:bool=True, exp:int=0) -> vs.VideoNode:
+    pscrn:Optional[int]=None, opt:bool=True, int16_prescreener:bool=True,
+    int16_predictor:bool=True, exp:int=0) -> vs.VideoNode:
 
     # nnedi3_rpow2 is for enlarging images by powers of 2.
 
@@ -1200,8 +1268,6 @@ def nnedi3_rpow2(clip:vs.VideoNode, rfactor:int=2, correct_shift:bool=True,
     while tmp < rfactor:
         tmp *= 2
         times += 1
-
-    # Checks
 
     if rfactor < 2 or rfactor > 1024:
         raise ValueError("nnedi3_rpow2: rfactor must be between 2 and 1024")
@@ -1248,7 +1314,8 @@ def nnedi3_rpow2(clip:vs.VideoNode, rfactor:int=2, correct_shift:bool=True,
 def boundary_resize(clip:vs.VideoNode, width:Optional[int]=None,
     height:Optional[int]=None, scale:Optional[Union[int, float]]=None,
     multiple:int=2, crop:bool=False, kernel:str="didée",
-    taps:Optional[int]=None, ssim:bool=False, ssim_kwargs:dict={}) -> vs.VideoNode:
+    taps:Optional[int]=None, ssim:bool=False, ssim_kwargs:dict={},
+    csp:Optional[int]=None, css:Optional[str]=None) -> vs.VideoNode:
 
     if scale is not None:
         clip = resize(clip, scale=scale)
@@ -1279,7 +1346,7 @@ def boundary_resize(clip:vs.VideoNode, width:Optional[int]=None,
     if ssim:
         clip = ssim_downsample(clip, height=new_height, width=new_width, kernel=kernel, **ssim_kwargs)
     else:
-        clip = resize(clip, height=new_height, width=new_width, kernel=kernel)
+        clip = resize(clip, height=new_height, width=new_width, kernel=kernel, csp=csp, css=css)
 
     if multiple > 1 and crop:
         new_width_div  = helper.mod_m(new_width, multiple)
@@ -1296,39 +1363,29 @@ def down_to_444(clip:vs.VideoNode, kernel:str="didée") -> vs.VideoNode:
     if clip.format.color_family != vs.YUV:
         raise vs.Error('down_to_444: only YUV format is supported')
 
-    y = vs.core.std.ShufflePlanes(clip, planes=0, colorfamily=vs.GRAY)
-    u = vs.core.std.ShufflePlanes(clip, planes=1, colorfamily=vs.GRAY)
-    v = vs.core.std.ShufflePlanes(clip, planes=2, colorfamily=vs.GRAY)
+    clip = resize(clip=clip, height=clip.height/2, width=clip.width/2, kernel=kernel, csp=vs.YUV444P16, css="444")
 
-    height = u.height
-    width  = u.width
-
-    y = resize(clip=y, height=height, width=width, kernel=kernel)
-    u = resize(clip=u, height=height, width=width, kernel=kernel)
-    v = resize(clip=v, height=height, width=width, kernel=kernel)
-
-    clip = vs.core.std.ShufflePlanes(clips=[y,u,v], planes=[0,0,0], colorfamily=vs.YUV)
     return clip
 
 def up_to_444(clip:vs.VideoNode, kernel:str="robidoux") -> vs.VideoNode:
     # 4k 420 -> 4k 444
 
     if clip.format.color_family != vs.YUV:
-        raise vs.Error('down_to_444: only YUV format is supported')
+        raise vs.Error('up_to_444: only YUV format is supported')
 
-    y = vs.core.std.ShufflePlanes(clip, planes=0, colorfamily=vs.GRAY)
-    u = vs.core.std.ShufflePlanes(clip, planes=1, colorfamily=vs.GRAY)
-    v = vs.core.std.ShufflePlanes(clip, planes=2, colorfamily=vs.GRAY)
+    clip = resize(clip=clip, height=clip.height, width=clip.width, kernel=kernel, csp=vs.YUV444P16, css="444")
 
-    height = y.height
-    width  = y.width
-
-    y = resize(clip=y, height=height, width=width, kernel=kernel)
-    u = resize(clip=u, height=height, width=width, kernel=kernel)
-    v = resize(clip=v, height=height, width=width, kernel=kernel)
-
-    clip = vs.core.std.ShufflePlanes(clips=[y,u,v], planes=[0,0,0], colorfamily=vs.YUV)
     return clip
+
+# def up_to_444_znedi_but_terrible(clip:vs.VideoNode) -> vs.VideoNode:
+
+#     nnclip = down_to_444(clip, "point")
+#     nnclip = nnedi3_rpow2(nnclip, rfactor=2)
+
+#     # need to figure out a way to make nnedi3_rpow2 only process the chroma planes
+
+#     clip = vs.core.std.ShufflePlanes(clips=[clip,nnclip], planes=[0,1,2], colorfamily=vs.YUV)
+#     return clip
 
 def bt2390_ictcp(clip:vs.VideoNode, source_peak:Optional[int]=None,
     target_nits:float=1) -> vs.VideoNode:
@@ -1498,6 +1555,8 @@ def mv_scene_detection(clip:vs.VideoNode, preset:str='fast', super_pel:int=2,
         preset_number = 1
     elif preset == 'slow':
         preset_number = 2
+    else:
+        raise vs.Error("mv_scene_detection: Preset must be fast medium or slow")
 
     if overlapv is None: overlapv = overlap
     if search is None: search = [0,5,3][preset_number]
