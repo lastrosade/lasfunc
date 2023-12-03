@@ -2,7 +2,7 @@ import vapoursynth as vs
 import math
 import os
 import subprocess
-from functools import partial
+import functools
 from typing import Optional, Union, List, NamedTuple, Literal
 # https://peps.python.org/pep-0483/#fundamental-building-blocks
 
@@ -24,8 +24,6 @@ from typing import Optional, Union, List, NamedTuple, Literal
 # https://github.com/HomeOfVapourSynthEvolution/VapourSynth-TCanny
 # https://github.com/HomeOfAviSynthPlusEvolution/neo_f3kdb
 # https://f3kdb.readthedocs.io/en/stable/usage.html
-
-
 
 class check:
 
@@ -86,7 +84,7 @@ class helper:
 
 class util:
 
-    def fmtc_kernel_kwargs(kernel:str, taps:Optional[int]=None):
+    def fmtc_kernel_kwargs(kernel:str, taps:Optional[int]=None, strength:Optional[int]=None):
 
         kernel = kernel.lower()
         if kernel in ["point", "nearest", "neighbour"]:
@@ -105,12 +103,14 @@ class util:
         # Bicubic
         elif kernel in ["didée", "didee"]:
             kernel_kwargs = {"kernel": "bicubic", "a1": -1/2, "a2": 1/4}
-        elif kernel in ["mitchell", "mitchell-netravali"]:
+        elif kernel in ["mitchell", "mitchell-netravali", "neutral"]:
             kernel_kwargs = {"kernel": "bicubic", "a1": 1/3, "a2": 1/3}
         elif kernel in ["catrom", "catmullrom", "catmull-rom"]:
             kernel_kwargs = {"kernel": "bicubic", "a1": 0, "a2": 1/2}
-        elif kernel == "bicubicsharp":
+        elif kernel in ["bicubicsharp", "sharp"]:
             kernel_kwargs = {"kernel": "bicubic", "a1": 0, "a2": 1}
+        elif kernel in ["bicubiczoptineutral", "zoptineutral"]:
+            kernel_kwargs = {"kernel": "bicubic", "a1": -0.6, "a2": 0.3}
         elif kernel == "robidouxsoft":
             x = (9 - 3 * math.sqrt(2)) / 7
             kernel_kwargs = {"kernel": "bicubic",
@@ -126,6 +126,11 @@ class util:
                             "a2": 7 / (2 + 12 * math.sqrt(2))}
         elif kernel == "bspline":
             kernel_kwargs = {"kernel": "bicubic", "a1": 1, "a2": 0}
+        elif kernel in ["setsuCcbic", "setsu"]:
+            strength = 100 if strength is None else strength
+            kernel_kwargs = {"kernel": "bicubic",
+                             "a1": math.asinh(.5) * math.acos(.5) * -abs(math.cos(strength*4)),
+                             "a2": abs(math.asinh(.5) * math.acos(-.5) * math.cos((strength*4) + strength/2))}
 
         # Impulse
         elif kernel in ["parzen–rosenblatt", "parzen", "kde"]:
@@ -152,10 +157,6 @@ class util:
             -0.003156, 0, 0.002475, 0.00402406, 0.004606, 0.00434445, 0.003478,
             0.00229289, 0.001061, 0, -0.000757, -0.0011651, -0.001252, -0.00109846,
             -0.000808, -0.000481802, -0.000197]
-            import numpy as np
-            window = np.kaiser(51, 14)
-            n = np.linalg.norm(window)
-            impulse = window/n
             kernel_kwargs = {"kernel": "impulse",
             "impulse": [*impulse[:-1], *impulse[::-1]]}
 
@@ -1093,7 +1094,7 @@ def boundary_pad(clip:vs.VideoNode, boundary_width:int, boundary_height:int,
 
 def resize(clip:vs.VideoNode, width:Optional[int]=None,
     height:Optional[int]=None, scale:Optional[Union[int, float]]=None,
-    kernel:str="didée", taps:Optional[int]=None,
+    kernel:str="didée", taps:Optional[int]=None, strength:Optional[int]=None, 
     csp:Optional[int]=None, css:Optional[str]=None) -> vs.VideoNode:
 
     if hasattr(vs.core, 'fmtc') is not True:
@@ -1106,7 +1107,7 @@ def resize(clip:vs.VideoNode, width:Optional[int]=None,
     else:
         raise vs.Error("resize: Must specify scale or height and scale")
 
-    kernel_kwargs = util.fmtc_kernel_kwargs(kernel, taps)
+    kernel_kwargs = util.fmtc_kernel_kwargs(kernel, taps, strength)
 
     clip = vs.core.fmtc.resample(clip, **scale_kwargs, **kernel_kwargs, csp=csp, css=css)
     return clip
@@ -1199,9 +1200,9 @@ def ssim_downsample(clip:vs.VideoNode, width:int, height:int, smooth:Union[int,f
         raise ValueError('ssim_downsample: only 32 bits float is allowed')
 
     if isinstance(smooth, int):
-        filter_func = partial(vs.core.std.BoxBlur, hradius=smooth, vradius=smooth)
+        filter_func = functools.partial(vs.core.std.BoxBlur, hradius=smooth, vradius=smooth)
     elif isinstance(smooth, float):
-        filter_func = partial(vs.core.tcanny.TCanny, sigma=smooth, mode=-1)
+        filter_func = functools.partial(vs.core.tcanny.TCanny, sigma=smooth, mode=-1)
     else:
         vs.Error("ssim_downsample: smooth must be an int or float")
 
@@ -2036,3 +2037,97 @@ def retinex_deband(clip:vs.VideoNode, preset:str="high/nograin",
     mask = util.retinex_edge(clip, method=method, thr=thr).std.Inflate()
     deband = vs.core.neo_f3kdb.Deband(clip, preset=preset, **f3kdb_kwargs)
     return vs.core.std.MaskedMerge(clipa=deband, clipb=clip, mask=mask)
+
+def mage_denoise(clip:vs.VideoNode, denoise_strength:int=110, bicubic_desharp:bool=True, 
+    restore_edges:bool=True, prefilter_scale_ratio:float=0.5, sharpness:float=0.98,
+    BF_kernel:str="sharp", BD_kernel:str="mitchell") -> vs.VideoNode:
+    # From Clybius
+    # Managing Everything Through Heuristics
+
+    # denoise_strength
+    # bicubic_desharp           Applies bicubic desharpening after the denoising process, slightly unsharpens video
+    # restore_edges             Uses a retinex mask to create edges at a low resolution, then upscale and restore from the mask
+    # prefilter_scale_ratio     Value to multiply the video resolutions by for prefiltering, 0.5-0.75 recommended for 1080p
+    # sharpness=0.98
+
+    # Advanced Settings (Not recommended to modify unless you know what you're doing)
+    # BF_A                      Bicubic upscaling filter 1 for desharpening, sharp by default
+    # BF_B
+    # BD_A                      Bicubic upscaling filter 2 for desharpening, neutral/mitchell by default
+    # BD_B
+
+    HEIGHT = clip.height
+    WIDTH = clip.width
+
+    clipSource = vs.core.resize.Spline36(clip, format=vs.YUV420P16)
+
+    clip = resize(clipSource, width=WIDTH*prefilter_scale_ratio, height=HEIGHT*prefilter_scale_ratio, kernel="zoptineutral")
+
+    super = vs.core.mv.Super(clip, hpad=32, vpad=32, rfilter=4) # all levels for MAnalyse
+
+    backward2 = vs.core.mv.Analyse(super, isb=True, blksize=32, overlap=16, delta=2, search=5, truemotion=True, trymany=True, badsad=600, badrange=-48)
+    backward = vs.core.mv.Analyse(super, isb=True, blksize=32, overlap=16, search=5, truemotion=True, trymany=True, badsad=600, badrange=-48)
+    forward = vs.core.mv.Analyse(super, isb=False, blksize=32, overlap=16, search=5, truemotion=True, trymany=True, badsad=600, badrange=-48)
+    forward2 = vs.core.mv.Analyse(super, isb=False, blksize=32, overlap=16, search=5, delta=2, truemotion=True, trymany=True, badsad=600, badrange=-48)
+
+    dn1 = vs.core.mv.Degrain2(clip, super, backward, forward, backward2, forward2, thsad=denoise_strength, thscd1=220, thscd2=105, plane=0) # Heavily denoise for edge mask
+
+    # Create low-res edgemask
+    if restore_edges == 1:
+        clipPre = vs.core.std.ShufflePlanes(dn1, planes=0, colorfamily=vs.GRAY) # Get Y plane for later edgemasking
+        dmask = vs.core.retinex.MSRCP(clipPre, sigma=[50, 200, 350]) # Retinex for better masking
+        
+        dmask = vs.core.tcanny.TCanny(dmask, mode=1, op=1, scale=1.2).std.Levels(min_in=4608, gamma=2.5).std.Maximum().std.Maximum() # Mask and fatten it up without binarization
+        dmask = resize(dmask, width=WIDTH, height=HEIGHT, kernel="setsu")
+
+    dn1 = resize(dn1, width=WIDTH, height=HEIGHT, kernel="setsu")
+
+    compSharp = vs.core.cas.CAS(clipSource, sharpness=sharpness) # Sharpen clip for non-shown motion compensated frames, helps retain higher frequency detail at the expense of denoise strength
+
+    superdn1 = vs.core.mv.Super(dn1, hpad=16, vpad=16, rfilter=4)
+    superSharp = vs.core.mv.Super(compSharp, hpad=16, vpad=16, rfilter=4) # all levels for MAnalyse
+
+    backward2 = vs.core.mv.Analyse(superdn1, isb=True, blksize=16, overlap=8, delta=2, truemotion=False, trymany=True, badsad=600, badrange=-48) # Recalculate using new denoised clip
+    backward = vs.core.mv.Analyse(superdn1, isb=True, blksize=16, overlap=8, truemotion=False, trymany=True, badsad=600, badrange=-48)
+    forward = vs.core.mv.Analyse(superdn1, isb=False, blksize=16, overlap=8, truemotion=False, trymany=True, badsad=600, badrange=-48)
+    forward2 = vs.core.mv.Analyse(superdn1, isb=False, blksize=16, overlap=8, delta=2, truemotion=False, trymany=True, badsad=600, badrange=-48)
+
+    backward2 = vs.core.mv.Recalculate(superdn1, backward2, blksize=8, overlap=4, search=3, searchparam=4, dct=6, truemotion=True) # Recalculate bad mvs
+    backward = vs.core.mv.Recalculate(superdn1, backward, blksize=8, overlap=4, search=3, searchparam=4, dct=6, truemotion=True)
+    forward = vs.core.mv.Recalculate(superdn1, forward, blksize=8, overlap=4, search=3, searchparam=4, dct=6, truemotion=True)
+    forward2 = vs.core.mv.Recalculate(superdn1, forward2, blksize=8, overlap=4, search=3, searchparam=4, dct=6, truemotion=True)
+
+    backward_re2 = vs.core.mv.Finest(backward2)
+    backward_re = vs.core.mv.Finest(backward)
+    forward_re = vs.core.mv.Finest(forward)
+    forward_re2 = vs.core.mv.Finest(forward2)
+
+    def dynDenoise(_, f, strength, source, scale):
+        def curve(x):
+            return 0.25 / (-0.75 + math.exp(x * scale)) # Perceptual curve since 0.3 is a perceptually bright frame, despite it being only 0.3 full luminance
+        brightness = f.props['PlaneStatsAverage'] # Get properties from prop_src
+        scaler = curve(brightness) # Apply curve to scale
+        newStrength = strength * scaler # Multiply input strength by scale
+        return vs.core.mv.Degrain2(source, superSharp, backward_re, forward_re, backward_re2, forward_re2, thsad=newStrength, thscd1=200, thscd2=105) # Apply denoiser function here with new strength
+
+    clip_stats = vs.core.std.PlaneStats(clip, plane=0) # Get stats
+
+    clipDN = vs.core.std.FrameEval(clipSource, functools.partial(dynDenoise, source=clipSource, strength=denoise_strength * 0.75, scale=1.2), prop_src = [clip_stats]) # Evaluate the function at every frame
+
+    # Bicubic Spline Desharpening
+    if bicubic_desharp == 1:
+        clipDNS = clipDN # Copy clip
+        ## The following two lines act as a preprocessor for causing ringing/artifacting and a non-ringing filter for the preprocessor, respectively
+        clipDNSU = resize(clipDNS, width=WIDTH*1.5, height=HEIGHT*1.5, kernel=BF_kernel)
+        clipDNU = resize(clipDN, width=WIDTH*1.5, height=HEIGHT*1.5, kernel=BD_kernel)
+
+        clipDNS = vs.core.std.MakeDiff(clipDNU, clipDNSU) # Make diff of the two at upscaled resolution
+        clipDNU = resize(clipDN, width=WIDTH, height=HEIGHT, kernel="mitchell") # Scale down using a natural bicubic (0.333, 0.333)
+
+        clipDN = vs.core.std.MergeDiff(clipDN, clipDNS) # Finally, merge together
+
+    if restore_edges == 1:
+        clipDN = vs.core.std.MaskedMerge(clipDN, clipSource, dmask, planes=0) # Apply mask over original video
+
+    return clipDN
+

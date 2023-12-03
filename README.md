@@ -215,3 +215,13 @@ retinex_edge(clip:vs.VideoNode, method="prewitt", sigma:int=1,
 retinex_deband(clip:vs.VideoNode, preset:str="high/nograin",
     f3kdb_kwargs:dict={}, method:str="p", thr:Optional[int]=None) -> vs.VideoNode
 ```
+
+### Denoising
+
+```python
+# Managing Everything Through Heuristics
+mage_denoise(clip:vs.VideoNode, denoise_strength:int=110, bicubic_desharp:bool=True, 
+    restore_edges:bool=True, prefilter_scale_ratio:float=0.5, sharpness:float=0.98,
+    BF_kernel:str="sharp", BD_kernel:str="mitchell") -> vs.VideoNode
+# original script by clybius
+```
